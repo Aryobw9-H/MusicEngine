@@ -1,0 +1,39 @@
+# Build output
+bin/
+obj/
+out/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+*.nuget.props
+*.nuget.targets
+project.assets.json
+project.fragment.lock.json
+artifacts/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs / local cache
+*.log
+*.tmp
+*.cache
+
+# Test/debug scratch files (kept out of repo — re-runnable from HANDOFF)
+fifty-results.txt
+fifty-results-v2.txt
+final-test.txt
+fresh-queries.txt
+recheck-queries.txt

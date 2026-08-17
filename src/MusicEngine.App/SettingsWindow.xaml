@@ -1,0 +1,124 @@
+<Window x:Class="MusicEngine.App.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings" Width="640" SizeToContent="Height" MaxHeight="780"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="{StaticResource BgBrush}"
+        FontFamily="{StaticResource UiFont}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24,20">
+
+            <TextBlock Text="Settings" FontSize="18" FontWeight="Bold"
+                       Foreground="{StaticResource TextBrush}" Margin="0,0,0,4"/>
+            <TextBlock Text="Most changes apply instantly; proxy &amp; tool paths need a restart."
+                       FontSize="11.5" Foreground="{StaticResource FaintTextBrush}" Margin="0,0,0,18"/>
+
+            <!-- ═══ general ═══ -->
+            <TextBlock Text="GENERAL" FontSize="11" Foreground="{DynamicResource AccentBrush}"
+                       FontWeight="SemiBold" Margin="0,0,0,8"/>
+
+            <TextBlock Text="Music folder" Foreground="{StaticResource SubtleTextBrush}" Margin="0,0,0,5"/>
+            <DockPanel Margin="0,0,0,14">
+                <Button DockPanel.Dock="Right" Content="Browse…" Style="{StaticResource Btn}" Margin="8,0,0,0"
+                        Click="Browse_Click"/>
+                <TextBox x:Name="OutputBox" Style="{StaticResource Input}"/>
+            </DockPanel>
+
+            <Grid Margin="0,0,0,14">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="Filename template" Foreground="{StaticResource SubtleTextBrush}"/>
+                    <ComboBox x:Name="TemplateBox" Style="{StaticResource Combo}" Margin="0,5,10,0" Width="230"
+                              HorizontalAlignment="Left" SelectedIndex="0">
+                        <ComboBoxItem Content="Artist - Title"/>
+                        <ComboBoxItem Content="Title"/>
+                        <ComboBoxItem Content="Artist - Title (Source)"/>
+                    </ComboBox>
+                </StackPanel>
+                <StackPanel Grid.Column="1">
+                    <TextBlock Text="MP3 bitrate (yt-dlp conversion)" Foreground="{StaticResource SubtleTextBrush}"/>
+                    <ComboBox x:Name="BitrateBox" Style="{StaticResource Combo}" Margin="0,5,0,0" Width="110"
+                              HorizontalAlignment="Right" SelectedIndex="2">
+                        <ComboBoxItem Content="128 kbps"/>
+                        <ComboBoxItem Content="192 kbps"/>
+                        <ComboBoxItem Content="320 kbps"/>
+                    </ComboBox>
+                </StackPanel>
+            </Grid>
+
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <CheckBox Grid.Column="0" x:Name="ToastsBox" Style="{StaticResource Switch}"
+                          Content="Toast when a download finishes" FontSize="12"/>
+                <CheckBox Grid.Column="1" x:Name="TrayBox" Style="{StaticResource Switch}"
+                          Content="Stay in tray while downloads run" FontSize="12"/>
+            </Grid>
+            <CheckBox x:Name="ClipboardBox" Style="{StaticResource Switch}" Margin="0,0,0,4"
+                      Content="Watch clipboard for Spotify / YouTube links" FontSize="12"/>
+
+            <!-- accent -->
+            <TextBlock Text="Accent color" Foreground="{StaticResource SubtleTextBrush}" Margin="0,12,0,6"/>
+            <StackPanel x:Name="AccentPanel" Orientation="Horizontal"/>
+
+            <!-- ═══ sources ═══ -->
+            <TextBlock Text="SEARCH SOURCES" FontSize="11" Foreground="{DynamicResource AccentBrush}"
+                       FontWeight="SemiBold" Margin="0,18,0,8"/>
+            <TextBlock Text="Disabled sources are skipped in search AND download ranking."
+                       FontSize="11" Foreground="{StaticResource FaintTextBrush}" Margin="0,0,0,8"/>
+            <WrapPanel x:Name="SourcesPanel">
+                <CheckBox x:Name="SrcItunes" Style="{StaticResource Switch}" Content="iTunes" Margin="0,0,22,10" FontSize="12"/>
+                <CheckBox x:Name="SrcDeezer" Style="{StaticResource Switch}" Content="Deezer" Margin="0,0,22,10" FontSize="12"/>
+                <CheckBox x:Name="SrcYoutube" Style="{StaticResource Switch}" Content="YouTube" Margin="0,0,22,10" FontSize="12"/>
+                <CheckBox x:Name="SrcSoundcloud" Style="{StaticResource Switch}" Content="SoundCloud" Margin="0,0,22,10" FontSize="12"/>
+                <CheckBox x:Name="SrcRadioJavan" Style="{StaticResource Switch}" Content="Radio Javan" Margin="0,0,22,10" FontSize="12"/>
+                <CheckBox x:Name="SrcNex1" Style="{StaticResource Switch}" Content="Nex1Music" Margin="0,0,22,10" FontSize="12"/>
+                <CheckBox x:Name="SrcPersianSites" Style="{StaticResource Switch}" Content="Iranian sites (aimusicall)" Margin="0,0,22,10" FontSize="12"/>
+                <CheckBox x:Name="SrcPersianIndex" Style="{StaticResource Switch}" Content="Persian Index (music-fa / upmusics)" Margin="0,0,0,10" FontSize="12"/>
+            </WrapPanel>
+            <CheckBox x:Name="PersianIndexBox" Style="{StaticResource Switch}" Margin="0,2,0,0"
+                      Content="Persian Index sidecar (Python + curl_cffi)" FontSize="12"/>
+
+            <!-- ═══ network ═══ -->
+            <TextBlock Text="NETWORK" FontSize="11" Foreground="{DynamicResource AccentBrush}"
+                       FontWeight="SemiBold" Margin="0,18,0,8"/>
+
+            <TextBlock Text="Proxy (SOCKS5/HTTP) — used for YouTube, Deezer, SoundCloud &amp; yt-dlp. Empty = direct."
+                       Foreground="{StaticResource SubtleTextBrush}" Margin="0,0,0,5" TextWrapping="Wrap"/>
+            <TextBox x:Name="ProxyBox" Style="{StaticResource Input}" Margin="0,0,0,14"/>
+
+            <TextBlock Text="Browser for YouTube cookies (chrome, firefox, edge…) — helps with bot checks. Empty = none."
+                       Foreground="{StaticResource SubtleTextBrush}" Margin="0,0,0,5" TextWrapping="Wrap"/>
+            <TextBox x:Name="CookiesBox" Style="{StaticResource Input}" Margin="0,0,0,14"/>
+
+            <!-- ═══ performance ═══ -->
+            <TextBlock Text="PERFORMANCE" FontSize="11" Foreground="{DynamicResource AccentBrush}"
+                       FontWeight="SemiBold" Margin="0,18,0,8"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
+                <TextBlock Text="Parallel downloads" Foreground="{StaticResource SubtleTextBrush}"
+                           VerticalAlignment="Center" Margin="0,0,12,0"/>
+                <ComboBox x:Name="ParallelBox" Style="{StaticResource Combo}" Width="90" SelectedIndex="1">
+                    <ComboBoxItem Content="1"/>
+                    <ComboBoxItem Content="2"/>
+                    <ComboBoxItem Content="3"/>
+                    <ComboBoxItem Content="4"/>
+                    <ComboBoxItem Content="5"/>
+                    <ComboBoxItem Content="6"/>
+                </ComboBox>
+                <TextBlock Text="Direct MP3s use 4-segment parallel transfer automatically."
+                           FontSize="11" Foreground="{StaticResource FaintTextBrush}"
+                           VerticalAlignment="Center" Margin="14,0,0,0"/>
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                <Button Content="Cancel" Style="{StaticResource Btn}" Margin="0,0,8,0" Click="Cancel_Click"/>
+                <Button Content="Save" Style="{StaticResource BtnAccent}" Click="Save_Click"/>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Window>
