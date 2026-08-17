@@ -159,10 +159,11 @@ public sealed class DownloadItemViewModel : ViewModelBase
     }
 
     public bool IsActive => Phase is DownloadPhase.Queued or DownloadPhase.Resolving
-        or DownloadPhase.Downloading or DownloadPhase.Tagging;
+            or DownloadPhase.Downloading or DownloadPhase.Tagging;
 
-    public bool IsFinished => Phase is DownloadPhase.Completed or DownloadPhase.AlreadyOwned;
-    public bool IsFailed => Phase is DownloadPhase.Failed or DownloadPhase.Cancelled;
+        public bool IsFinished => Phase is DownloadPhase.Completed or DownloadPhase.AlreadyOwned;
+        public bool IsFailed => Phase is DownloadPhase.Failed or DownloadPhase.Cancelled;
+        public bool IsPaused => Phase == DownloadPhase.Paused;
 
     public void Apply(DownloadProgress p, string provider)
     {
@@ -213,9 +214,10 @@ public sealed class DownloadItemViewModel : ViewModelBase
         _lastAt = now;
 
         OnPropertyChanged(nameof(IsActive));
-        OnPropertyChanged(nameof(IsFinished));
-        OnPropertyChanged(nameof(IsFailed));
-    }
+                OnPropertyChanged(nameof(IsFinished));
+                OnPropertyChanged(nameof(IsFailed));
+                OnPropertyChanged(nameof(IsPaused));
+            }
 
     private static string HumanSize(long bytes) => bytes switch
     {

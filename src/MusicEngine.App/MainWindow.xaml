@@ -441,15 +441,27 @@
                                            VerticalAlignment="Center" Margin="0,0,10,0"
                                            TextTrimming="CharacterEllipsis" MaxWidth="300"/>
                                 <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
-                                    <Button Content="Open" Style="{StaticResource BtnGhost}" FontSize="11.5"
-                                            Click="OpenDownload_Click" Margin="0,0,4,0" ToolTip="Play the file"
-                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVis}}"/>
-                                    <Button Content="📁" Style="{StaticResource BtnGhost}" FontSize="11.5"
-                                            Click="OpenDownloadFolder_Click" Margin="0,0,4,0" ToolTip="Show in folder"
-                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVis}}"/>
-                                    <Button Content="✕" Style="{StaticResource BtnGhost}" FontSize="11.5"
-                                            Click="CancelDownload_Click" ToolTip="Cancel / remove"/>
-                                </StackPanel>
+                                                                    <Button Content="Open" Style="{StaticResource BtnGhost}" FontSize="11.5"
+                                                                            Click="OpenDownload_Click" Margin="0,0,4,0" ToolTip="Play the file"
+                                                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVis}}"/>
+                                                                    <Button Content="📁" Style="{StaticResource BtnGhost}" FontSize="11.5"
+                                                                            Click="OpenDownloadFolder_Click" Margin="0,0,4,0" ToolTip="Show in folder"
+                                                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVis}}"/>
+                                                                    <Button Content="⏸" Style="{StaticResource BtnGhost}" FontSize="11.5"
+                                                                            Command="{Binding DataContext.PauseDownloadCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                            CommandParameter="{Binding}" Margin="0,0,4,0" ToolTip="Pause"
+                                                                            Visibility="{Binding IsActive, Converter={StaticResource BoolToVis}}"/>
+                                                                    <Button Content="▶" Style="{StaticResource BtnGhost}" FontSize="11.5"
+                                                                            Command="{Binding DataContext.ResumeDownloadCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                            CommandParameter="{Binding}" Margin="0,0,4,0" ToolTip="Resume"
+                                                                            Visibility="{Binding IsPaused, Converter={StaticResource BoolToVis}}"/>
+                                                                    <Button Content="↻" Style="{StaticResource BtnGhost}" FontSize="11.5"
+                                                                            Command="{Binding DataContext.RestartDownloadCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                            CommandParameter="{Binding}" Margin="0,0,4,0" ToolTip="Restart download"
+                                                                            Visibility="{Binding IsFailed, Converter={StaticResource BoolToVis}}"/>
+                                                                    <Button Content="✕" Style="{StaticResource BtnGhost}" FontSize="11.5"
+                                                                            Click="CancelDownload_Click" ToolTip="Cancel / remove"/>
+                                                                </StackPanel>
                             </Grid>
                         </DataTemplate>
                     </ListBox.ItemTemplate>

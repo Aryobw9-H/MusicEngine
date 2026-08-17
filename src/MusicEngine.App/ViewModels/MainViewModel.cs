@@ -118,16 +118,19 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
     public string PlayerTime => $"{TimeSpan.FromSeconds(PlayerPosition):m\\:ss} / {TimeSpan.FromSeconds(PlayerDuration):m\\:ss}";
 
     public RelayCommand DownloadSelectedCommand { get; }
-    public RelayCommand DownloadAllCommand { get; }
-    public RelayCommand OpenSettingsCommand { get; }
-    public RelayCommand OpenFolderCommand { get; }
-    public RelayCommand ClearFinishedCommand { get; }
-    public RelayCommand ClearHistoryCommand { get; }
-    public RelayCommand ShowDownloadsCommand { get; }
-    public RelayCommand ShowHistoryCommand { get; }
-    public RelayCommand StopPreviewCommand { get; }
-    public RelayCommand SearchClipboardCommand { get; }
-    public RelayCommand DismissClipboardCommand { get; }
+        public RelayCommand DownloadAllCommand { get; }
+        public RelayCommand PauseDownloadCommand { get; }
+        public RelayCommand ResumeDownloadCommand { get; }
+        public RelayCommand RestartDownloadCommand { get; }
+        public RelayCommand OpenSettingsCommand { get; }
+        public RelayCommand OpenFolderCommand { get; }
+        public RelayCommand ClearFinishedCommand { get; }
+        public RelayCommand ClearHistoryCommand { get; }
+        public RelayCommand ShowDownloadsCommand { get; }
+        public RelayCommand ShowHistoryCommand { get; }
+        public RelayCommand StopPreviewCommand { get; }
+        public RelayCommand SearchClipboardCommand { get; }
+        public RelayCommand DismissClipboardCommand { get; }
 
     public string OutputDirectory => _config.OutputDirectory;
     public int ActiveDownloads => DownloadQueue.Count(d => d.IsActive);
@@ -163,56 +166,44 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
         Volume = 80;
 
         DownloadSelectedCommand = new RelayCommand(_ => { if (ResultsView.FirstOrDefault() is { } t) Download(t); });
-        DownloadAllCommand = new RelayCommand(_ => DownloadAll(), _ => ResultsView.Count > 0);
-        OpenSettingsCommand = new RelayCommand(_ => SettingsRequested?.Invoke());
-        OpenFolderCommand = new RelayCommand(_ => OpenFolder());
-        ClearFinishedCommand = new RelayCommand(_ =>
-        {
-            foreach (var d in DownloadQueue.Where(d => !d.IsActive).ToList())
-                DownloadQueue.Remove(d);
-        });
-        ClearHistoryCommand = new RelayCommand(_ => { _state.ClearHistory(); History.Clear(); });
-        ShowDownloadsCommand = new RelayCommand(_ => { ShowDownloads = true; ShowHistory = false; });
-        ShowHistoryCommand = new RelayCommand(_ => { ShowDownloads = false; ShowHistory = true; });
-        StopPreviewCommand = new RelayCommand(_ => StopPreview());
-        SearchClipboardCommand = new RelayCommand(_ => { Query = ClipboardPill; ClipboardPill = ""; _ = SearchAsync(); });
-        DismissClipboardCommand = new RelayCommand(_ => ClipboardPill = "");
-
-        _downloads.JobAdded += job => _ui.Run(() =>
-                        {
-                            _jobIdentity[job.Id] = (job.Title, job.Artist);
-                            DownloadQueue.Insert(0, new DownloadItemViewModel(job.Id, $"{job.Artist} — {job.Title}"));
-                            OnPropertyChanged(nameof(ActiveDownloads));
-                        });
-                        _downloads.JobProgress += (id, p) => _ui.Run(() =>
+                DownloadAllCommand = new RelayCommand(_ => DownloadAll(), _ => ResultsView.Count > 0);
+                PauseDownloadCommand = new RelayCommand(p => { if (p is DownloadItemViewModel d) _downloads.Pause(d.JobId); });
+                ResumeDownloadCommand = new RelayCommand(p => { if (p is DownloadItemViewModel d) _downloads.Resume(d.JobId); });
+                RestartDownloadCommand = new RelayCommand(p => 
                 {
-                    var item = DownloadQueue.FirstOrDefault(d => d.JobId == id);
-                    if (item is null) return;
-                    item.Apply(p, _jobProvider.TryGetValue(id, out var prov) ? prov : "");
-                    if (p.Phase is DownloadPhase.Completed or DownloadPhase.AlreadyOwned
-                        or DownloadPhase.Failed or DownloadPhase.Cancelled)
+                    if (p is DownloadItemViewModel d)
                     {
-                        OnPropertyChanged(nameof(ActiveDownloads));
-                        if (p.Phase == DownloadPhase.Completed)
+                        _downloads.Cancel(d.JobId);
+                        var parts = d.Title.Split(new[] { " — " }, StringSplitOptions.None);
+                        if (parts.Length == 2)
                         {
-                            if (_jobIdentity.TryGetValue(id, out var identity) && p.FilePath is { Length: > 0 })
-                                RecordHistory(identity.Title, identity.Artist, p.FilePath,
-                                    _jobProvider.TryGetValue(id, out var provName) ? provName : "MusicEngine");
-                            if (_config.DownloadToasts)
-                                PushToast(new ToastViewModel { Title = "Download complete", Message = item.Title, FilePath = p.FilePath });
-                        }
-                        else if (p.Phase is DownloadPhase.Failed or DownloadPhase.Cancelled)
-                        {
-                            // Allow retry: remove from queued works so user can re-download
-                            if (_jobIdentity.TryGetValue(id, out var failedIdentity))
-                            {
-                                var key = $"{failedIdentity.Title}|{failedIdentity.Artist}".Trim();
-                                _queuedWorks.Remove(key);
-                            }
-                            if (p.Phase == DownloadPhase.Failed && _config.DownloadToasts)
-                                PushToast(new ToastViewModel { Title = "Download failed", Message = item.Title, IsError = true });
+                            var key = $"{parts[1]}|{parts[0]}".Trim();
+                            _queuedWorks.Remove(key);
+                            var work = Results.FirstOrDefault(r => r.Title == parts[1] && r.Artist == parts[0])?.Work;
+                            if (work != null) _ = _downloads.EnqueueAsync(work);
                         }
                     }
+                });
+                OpenSettingsCommand = new RelayCommand(_ => SettingsRequested?.Invoke());
+                OpenFolderCommand = new RelayCommand(_ => OpenFolder());
+                ClearFinishedCommand = new RelayCommand(_ =>
+                {
+                    foreach (var d in DownloadQueue.Where(d => !d.IsActive).ToList())
+                        DownloadQueue.Remove(d);
+                });
+                ClearHistoryCommand = new RelayCommand(_ => { _state.ClearHistory(); History.Clear(); });
+                ShowDownloadsCommand = new RelayCommand(_ => { ShowDownloads = true; ShowHistory = false; });
+                ShowHistoryCommand = new RelayCommand(_ => { ShowDownloads = false; ShowHistory = true; });
+                StopPreviewCommand = new RelayCommand(_ => StopPreview());
+                SearchClipboardCommand = new RelayCommand(_ => { Query = ClipboardPill; ClipboardPill = ""; _ = SearchAsync(); });
+                DismissClipboardCommand = new RelayCommand(_ => ClipboardPill = "");
+
+                _downloads.JobAdded += job => _ui.Run(() =>
+                {
+                    _jobIdentity[job.Id] = (job.Title, job.Artist);
+                    if (!DownloadQueue.Any(d => d.JobId == job.Id))
+                        DownloadQueue.Insert(0, new DownloadItemViewModel(job.Id, $"{job.Artist} — {job.Title}"));
+                    OnPropertyChanged(nameof(ActiveDownloads));
                 });
                 _downloads.JobStarted += (id, providerName) => _jobProvider[id] = providerName;
 

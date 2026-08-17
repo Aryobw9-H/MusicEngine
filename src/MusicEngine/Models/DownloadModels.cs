@@ -7,10 +7,11 @@ public enum DownloadPhase
     Downloading,
     Tagging,
     Completed,
-    Failed,
-    Cancelled,
-    AlreadyOwned,
-}
+        Failed,
+        Cancelled,
+        AlreadyOwned,
+        Paused,
+    }
 
 /// <summary>Progress payload for a download job.</summary>
 public sealed record DownloadProgress(

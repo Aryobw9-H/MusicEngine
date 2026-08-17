@@ -170,10 +170,11 @@ public sealed class PersianIndexProvider : ISearchProvider, IDownloadProvider
         foreach (var arg in args) psi.ArgumentList.Add(arg);
 
         using var proc = new Process { StartInfo = psi };
-        proc.Start();
+                proc.Start();
+                using var reg = ct.Register(() => { try { proc.Kill(true); } catch { } });
 
-        var stderrTask = proc.StandardError.ReadToEndAsync(ct);
-        var lines = new List<string>();
+                var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+                var lines = new List<string>();
         while (await proc.StandardOutput.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
         {
             // "PROGRESS <pct> <done> <total>" lines stream download progress; the

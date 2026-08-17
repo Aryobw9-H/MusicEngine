@@ -31,6 +31,8 @@ public sealed class DownloadManager
 
     private readonly Channel<(EnqueuedJob Job, TaskCompletionSource<DownloadProgress> Completion, CancellationTokenSource Cts)> _queue;
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new();
+    private readonly ConcurrentDictionary<string, EnqueuedJob> _jobs = new();
+    private readonly ConcurrentDictionary<string, bool> _paused = new();
     private readonly CancellationTokenSource _shutdown = new();
     private readonly List<Task> _workers = new();
 
@@ -68,6 +70,7 @@ public sealed class DownloadManager
             work.Artist,
             work);
 
+        _jobs[job.Id] = job;
         var tcs = new TaskCompletionSource<DownloadProgress>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cts = new CancellationTokenSource();
         _active[job.Id] = cts;
@@ -76,7 +79,44 @@ public sealed class DownloadManager
         return tcs.Task;
     }
 
-    public bool Cancel(string jobId) => _active.TryGetValue(jobId, out var cts) && CancelCore(cts);
+    public bool Cancel(string jobId)
+    {
+        _jobs.TryRemove(jobId, out _);
+        _paused.TryRemove(jobId, out _);
+        if (_active.TryGetValue(jobId, out var cts))
+            return CancelCore(cts);
+
+        if (_paused.TryRemove(jobId, out _))
+        {
+            JobProgress?.Invoke(jobId, new DownloadProgress(DownloadPhase.Cancelled, Message: "Cancelled"));
+            return true;
+        }
+        return false;
+    }
+
+    public bool Pause(string jobId)
+    {
+        if (_active.TryGetValue(jobId, out var cts))
+        {
+            _paused[jobId] = true;
+            return CancelCore(cts);
+        }
+        return false;
+    }
+
+    public bool Resume(string jobId)
+    {
+        if (_jobs.TryGetValue(jobId, out var job) && !_active.ContainsKey(jobId))
+        {
+            _paused.TryRemove(jobId, out _);
+            var tcs = new TaskCompletionSource<DownloadProgress>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cts = new CancellationTokenSource();
+            _active[jobId] = cts;
+            _queue.Writer.TryWrite((job, tcs, cts));
+            return true;
+        }
+        return false;
+    }
 
     private static bool CancelCore(CancellationTokenSource cts)
     {
@@ -96,98 +136,141 @@ public sealed class DownloadManager
             }
             catch (OperationCanceledException)
             {
-                tcs.TrySetResult(new DownloadProgress(DownloadPhase.Cancelled, Message: "Cancelled"));
+                if (_paused.TryRemove(job.Id, out _))
+                {
+                    tcs.TrySetResult(new DownloadProgress(DownloadPhase.Paused, Message: "Paused"));
+                }
+                else
+                {
+                    _jobs.TryRemove(job.Id, out _);
+                    tcs.TrySetResult(new DownloadProgress(DownloadPhase.Cancelled, Message: "Cancelled"));
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogWarning("Download job failed: {Title} — {Msg}", job.Title, ex.Message);
+                _jobs.TryRemove(job.Id, out _);
                 tcs.TrySetResult(new DownloadProgress(DownloadPhase.Failed, Message: ex.Message));
             }
             finally
             {
                 _active.TryRemove(job.Id, out _);
                 cts.Dispose();
+                if (!_paused.ContainsKey(job.Id) && !_active.ContainsKey(job.Id))
+                    _jobs.TryRemove(job.Id, out _);
             }
         }
     }
 
     private async Task<DownloadProgress> RunJobAsync(
             EnqueuedJob job, TaskCompletionSource<DownloadProgress> tcs, CancellationToken ct)
+    {
+        var work = job.Work;
+        var options = new DownloadOptions
         {
-            var work = job.Work;
-            var options = new DownloadOptions
+            OutputDirectory = _config.OutputDirectory,
+            MaxBitrateKbps = _config.BitrateKbps,
+            EmbedTags = true,
+            TagTemplate = BuildTagTemplate(work),
+            FilenameTemplate = _config.FilenameTemplate,
+        };
+        Directory.CreateDirectory(options.OutputDirectory);
+
+        var progress = new ProgressProxy(job.Id, tcs, JobProgress);
+        progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null, "Resolving best source…"));
+
+        // Already downloaded? Done instantly.
+        var firstDownloadable = work.DownloadableVersions.FirstOrDefault();
+        var existing = FileNaming.ExistingPath(options.OutputDirectory, options.TagTemplate!,
+            firstDownloadable ?? work.Representative, _config.FilenameTemplate);
+        if (existing is not null)
+        {
+            var p = new DownloadProgress(DownloadPhase.AlreadyOwned, 1, 1, "Already in your library", existing);
+            return p;
+        }
+
+        var candidates = await ResolveCandidatesAsync(work, options.TagTemplate!, progress, ct).ConfigureAwait(false);
+        foreach (var candidate in candidates)
+        {
+            if (ct.IsCancellationRequested)
+                return new DownloadProgress(DownloadPhase.Cancelled, Message: "Cancelled");
+
+            var chain = BuildChain(candidate);
+            foreach (var provider in chain)
             {
-                OutputDirectory = _config.OutputDirectory,
-                MaxBitrateKbps = _config.BitrateKbps,
-                EmbedTags = true,
-                TagTemplate = BuildTagTemplate(work),
-                FilenameTemplate = _config.FilenameTemplate,
-            };
-            Directory.CreateDirectory(options.OutputDirectory);
-
-            var progress = new ProgressProxy(job.Id, tcs, JobProgress);
-            progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null, "Resolving best source…"));
-
-            // Already downloaded? Done instantly.
-            var firstDownloadable = work.DownloadableVersions.FirstOrDefault();
-            var existing = FileNaming.ExistingPath(options.OutputDirectory, options.TagTemplate!,
-                firstDownloadable ?? work.Representative, _config.FilenameTemplate);
-            if (existing is not null)
-            {
-                var p = new DownloadProgress(DownloadPhase.AlreadyOwned, 1, 1, "Already in your library", existing);
-                return p;
-            }
-
-            var candidates = await ResolveCandidatesAsync(work, options.TagTemplate!, progress, ct).ConfigureAwait(false);
-            foreach (var candidate in candidates)
-            {
-                if (ct.IsCancellationRequested)
-                    return new DownloadProgress(DownloadPhase.Cancelled, Message: "Cancelled");
-
-                var chain = BuildChain(candidate);
-                foreach (var provider in chain)
+                try
                 {
+                    progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null,
+                                            $"Via {provider.DisplayName}…"));
+                    JobStarted?.Invoke(job.Id, provider.DisplayName);
+
+                    using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var resolveTask = provider.DownloadAsync(candidate, options, progress, watchdogCts.Token);
+
+                    var watchdog = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            while (!resolveTask.IsCompleted)
+                            {
+                                await Task.Delay(5000, watchdogCts.Token);
+                                if (progress.TimeSinceLastProgress > TimeSpan.FromSeconds(60))
+                                {
+                                    watchdogCts.Cancel();
+                                    break;
+                                }
+                            }
+                        }
+                        catch (OperationCanceledException) { }
+                        finally
+                        {
+                            watchdogCts.Dispose();
+                        }
+                    });
+
+                    var resolveTimeout = Task.Delay(TimeSpan.FromSeconds(30), watchdogCts.Token);
+                    var winner = await Task.WhenAny(resolveTask, resolveTimeout).ConfigureAwait(false);
+                    if (winner == resolveTimeout && progress.LastPhase == DownloadPhase.Resolving)
+                    {
+                        watchdogCts.Cancel();
+                        progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null,
+                            $"{provider.DisplayName} timed out — trying fallback…"));
+                        continue;
+                    }
+
+                    DownloadResult result;
                     try
                     {
-                        progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null,
-                            $"Via {provider.DisplayName}…"));
-                        JobStarted?.Invoke(job.Id, provider.DisplayName);
-                    
-                        // Resolving timeout: if a provider hangs on metadata lookup, fail fast and try next
-                        var resolveTask = provider.DownloadAsync(candidate, options, progress, ct);
-                        var resolveTimeout = Task.Delay(TimeSpan.FromSeconds(30), ct);
-                        var winner = await Task.WhenAny(resolveTask, resolveTimeout).ConfigureAwait(false);
-                        if (winner == resolveTimeout)
-                        {
-                            progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null,
-                                $"{provider.DisplayName} timed out — trying fallback…"));
-                            continue;
-                        }
-                        var result = await resolveTask.ConfigureAwait(false);
-
-                        if (options.EmbedTags && provider.Id != ProviderId.YtDlp)
-                        {
-                            progress.Report(new DownloadProgress(DownloadPhase.Tagging, 0, null, "Writing tags…"));
-                            _tagger.Tag(result.FilePath, options.TagTemplate ?? candidate.Metadata);
-                        }
-
-                        var done = new DownloadProgress(DownloadPhase.Completed, 1, 1,
-                            $"Saved • {provider.DisplayName}", result.FilePath);
-                        return done;
+                        result = await resolveTask.ConfigureAwait(false);
                     }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex)
+                    catch (OperationCanceledException) when (watchdogCts.IsCancellationRequested && !ct.IsCancellationRequested)
                     {
-                        _logger.LogInformation("Download via {Provider} failed ({Msg}); trying next",
-                            provider.DisplayName, ex.Message);
-                        progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null,
-                            $"{provider.DisplayName} failed — trying fallback…"));
+                        throw new TimeoutException("Download stalled for 60 seconds.");
                     }
+
+                    if (options.EmbedTags && provider.Id != ProviderId.YtDlp)
+                    {
+                        progress.Report(new DownloadProgress(DownloadPhase.Tagging, 0, null, "Writing tags…"));
+                        _tagger.Tag(result.FilePath, options.TagTemplate ?? candidate.Metadata);
+                    }
+
+                    var done = new DownloadProgress(DownloadPhase.Completed, 1, 1,
+                        $"Saved • {provider.DisplayName}", result.FilePath);
+                    return done;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    _logger.LogInformation("Download via {Provider} failed ({Msg}); trying next",
+                        provider.DisplayName, ex.Message);
+                    progress.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null,
+                        $"{provider.DisplayName} failed — trying fallback…"));
                 }
             }
-
-            throw new InvalidOperationException("No source could download this track.");
         }
+
+        throw new InvalidOperationException("No source could download this track.");
+    }
 
     /// <summary>Catalog metadata wins: it is the cleanest identity for tags + filenames.</summary>
     private static TrackMetadata? BuildTagTemplate(TrackWork work)
@@ -316,6 +399,10 @@ public sealed class DownloadManager
         private readonly Action<string, DownloadProgress>? _event;
         private DownloadProgress _last;
         private DateTime _lastEmit = DateTime.UtcNow;
+        private DateTime _lastProgress = DateTime.UtcNow;
+
+        public TimeSpan TimeSinceLastProgress => DateTime.UtcNow - _lastProgress;
+        public DownloadPhase LastPhase => _last?.Phase ?? DownloadPhase.Queued;
 
         public ProgressProxy(string jobId, TaskCompletionSource<DownloadProgress> tcs,
             Action<string, DownloadProgress>? @event)
@@ -328,13 +415,15 @@ public sealed class DownloadManager
         public void Report(DownloadProgress value)
         {
             _last = value;
+            _lastProgress = DateTime.UtcNow;
             if (value.Phase is DownloadPhase.Failed or DownloadPhase.Cancelled or DownloadPhase.Completed
-                or DownloadPhase.AlreadyOwned)
+                or DownloadPhase.AlreadyOwned or DownloadPhase.Paused)
             {
                 _event?.Invoke(_jobId, value);
                 return;
             }
-            if ((DateTime.UtcNow - _lastEmit).TotalMilliseconds >= 120)
+            var throttleMs = value.Phase == DownloadPhase.Downloading ? 50 : 120;
+            if ((DateTime.UtcNow - _lastEmit).TotalMilliseconds >= throttleMs)
             {
                 _lastEmit = DateTime.UtcNow;
                 _event?.Invoke(_jobId, value);
