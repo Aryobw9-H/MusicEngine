@@ -102,10 +102,33 @@ public sealed class Reachability : IDisposable
         };
         if (proxied && proxyUrl is not null)
         {
-            handler.Proxy = new WebProxy(proxyUrl, BypassOnLocal: true);
-            handler.UseProxy = true;
+            if (TryParseProxyUrl(proxyUrl, out var proxyUri))
+            {
+                handler.Proxy = new WebProxy(proxyUri, BypassOnLocal: true);
+                handler.UseProxy = true;
+            }
+            else
+            {
+                // Invalid proxy URL (e.g., port out of range) — skip proxy, log implicitly via dead routes
+            }
         }
         return new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(9) };
+    }
+
+    private static bool TryParseProxyUrl(string proxyUrl, out Uri proxyUri)
+    {
+        proxyUri = null!;
+        try
+        {
+            var uri = new Uri(proxyUrl);
+            if (uri.Port > 0 && uri.Port <= 65535)
+            {
+                proxyUri = uri;
+                return true;
+            }
+        }
+        catch { }
+        return false;
     }
 
     // ---------- network-change detection ----------

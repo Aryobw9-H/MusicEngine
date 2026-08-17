@@ -11,6 +11,8 @@ using Microsoft.Extensions.Logging;
 using Providers;
 using Search;
 using ViewModels;
+using MusicEngine.App.Ui;
+using MusicEngine.Http;
 
 /// <summary>
 /// Composition root: config → state → http → providers → pipeline → download
@@ -85,10 +87,21 @@ public partial class App : Application
                 sp.GetRequiredService<TrackTagger>());
         });
         services.AddSingleton<PreviewPlayer>();
-        services.AddSingleton<MainViewModel>();
-        services.AddSingleton<MainWindow>();
+                services.AddSingleton<IDispatcher, Ui.WpfDispatcher>();
+                services.AddSingleton<IArtworkLoader, ArtworkLoader>();
+                services.AddSingleton<MainViewModel>(sp => new MainViewModel(
+                    sp.GetRequiredService<ProviderRegistry>(),
+                    sp.GetRequiredService<DownloadManager>(),
+                    sp.GetRequiredService<PreviewPlayer>(),
+                    sp.GetRequiredService<AppConfig>(),
+                    sp.GetRequiredService<AppState>(),
+                    sp.GetRequiredService<SearchResultCache>(),
+                    sp.GetRequiredService<ProviderHealthMonitor>(),
+                    sp.GetRequiredService<IDispatcher>(),
+                    sp.GetRequiredService<IArtworkLoader>()));
+                services.AddSingleton<MainWindow>();
 
-        _services = services.BuildServiceProvider();
+                _services = services.BuildServiceProvider();
 
         AccentTheme.Apply(config.Accent);
 

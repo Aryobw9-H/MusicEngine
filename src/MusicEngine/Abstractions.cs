@@ -52,3 +52,13 @@ public interface IPreviewProvider : IMusicProvider
 {
     Uri? GetPreviewStreamUri(SearchResult track);
 }
+
+public interface IDispatcher
+{
+    void Run(Action action);
+}
+
+public interface IArtworkLoader
+{
+    Task<byte[]?> LoadAsync(Uri uri, CancellationToken ct = default);
+}

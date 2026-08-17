@@ -5,10 +5,8 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows.Media.Imaging;
-using System.Windows.Threading;
 using Configuration;
 using Downloads;
-using Http;
 using Models;
 using Providers;
 using Search;
@@ -25,12 +23,13 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
     private readonly PreviewPlayer _preview;
     private readonly AppConfig _config;
     private readonly AppState _state;
-    private readonly SharedHttpClient _http;
-    private readonly SearchResultCache _cache;
-    private readonly ProviderHealthMonitor _health;
-    private readonly DispatcherTimer _playerTimer;
-    private readonly DispatcherTimer _toastTimer;
-    private readonly DispatcherTimer _clipboardTimer;
+        private readonly SearchResultCache _cache;
+        private readonly ProviderHealthMonitor _health;
+        private readonly IDispatcher _ui;
+        private readonly IArtworkLoader _artwork;
+        private readonly System.Threading.Timer _playerTimer;
+        private readonly System.Threading.Timer _toastTimer;
+        private readonly System.Threading.Timer _clipboardTimer;
 
     private CancellationTokenSource? _searchCts;
     private TrackItemViewModel? _playingTrack;
@@ -136,23 +135,25 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
     public event Action? SettingsRequested;
 
     public MainViewModel(
-        ProviderRegistry providers,
-        DownloadManager downloads,
-        PreviewPlayer preview,
-        AppConfig config,
-        AppState state,
-        SharedHttpClient http,
-        SearchResultCache cache,
-        ProviderHealthMonitor health)
-    {
-        _providers = providers;
-        _downloads = downloads;
-        _preview = preview;
-        _config = config;
-        _state = state;
-        _http = http;
-        _cache = cache;
-        _health = health;
+            ProviderRegistry providers,
+            DownloadManager downloads,
+            PreviewPlayer preview,
+            AppConfig config,
+            AppState state,
+            SearchResultCache cache,
+            ProviderHealthMonitor health,
+            IDispatcher ui,
+            IArtworkLoader artwork)
+        {
+            _providers = providers;
+            _downloads = downloads;
+            _preview = preview;
+            _config = config;
+            _state = state;
+            _cache = cache;
+            _health = health;
+            _ui = ui;
+            _artwork = artwork;
 
         foreach (var r in state.RecentSearches.Take(8)) RecentSearches.Add(r);
         foreach (var h in state.History.Take(100)) History.Add(new HistoryItemViewModel
@@ -177,52 +178,55 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
         SearchClipboardCommand = new RelayCommand(_ => { Query = ClipboardPill; ClipboardPill = ""; _ = SearchAsync(); });
         DismissClipboardCommand = new RelayCommand(_ => ClipboardPill = "");
 
-        _downloads.JobAdded += job => RunOnUi(() =>
-        {
-            _jobIdentity[job.Id] = (job.Title, job.Artist);
-            DownloadQueue.Insert(0, new DownloadItemViewModel(job.Id, $"{job.Artist} — {job.Title}"));
-            OnPropertyChanged(nameof(ActiveDownloads));
-        });
-        _downloads.JobProgress += (id, p) => RunOnUi(() =>
-        {
-            var item = DownloadQueue.FirstOrDefault(d => d.JobId == id);
-            if (item is null) return;
-            item.Apply(p, _jobProvider.TryGetValue(id, out var prov) ? prov : "");
-            if (p.Phase is DownloadPhase.Completed or DownloadPhase.AlreadyOwned
-                or DownloadPhase.Failed or DownloadPhase.Cancelled)
-            {
-                OnPropertyChanged(nameof(ActiveDownloads));
-                if (p.Phase == DownloadPhase.Completed)
+        _downloads.JobAdded += job => _ui.Run(() =>
+                        {
+                            _jobIdentity[job.Id] = (job.Title, job.Artist);
+                            DownloadQueue.Insert(0, new DownloadItemViewModel(job.Id, $"{job.Artist} — {job.Title}"));
+                            OnPropertyChanged(nameof(ActiveDownloads));
+                        });
+                        _downloads.JobProgress += (id, p) => _ui.Run(() =>
                 {
-                    if (_jobIdentity.TryGetValue(id, out var identity) && p.FilePath is { Length: > 0 })
-                        RecordHistory(identity.Title, identity.Artist, p.FilePath,
-                            _jobProvider.TryGetValue(id, out var provName) ? provName : "MusicEngine");
-                    if (_config.DownloadToasts)
-                        PushToast(new ToastViewModel { Title = "Download complete", Message = item.Title, FilePath = p.FilePath });
-                }
-                else if (p.Phase == DownloadPhase.Failed && _config.DownloadToasts)
-                {
-                    PushToast(new ToastViewModel { Title = "Download failed", Message = item.Title, IsError = true });
-                }
+                    var item = DownloadQueue.FirstOrDefault(d => d.JobId == id);
+                    if (item is null) return;
+                    item.Apply(p, _jobProvider.TryGetValue(id, out var prov) ? prov : "");
+                    if (p.Phase is DownloadPhase.Completed or DownloadPhase.AlreadyOwned
+                        or DownloadPhase.Failed or DownloadPhase.Cancelled)
+                    {
+                        OnPropertyChanged(nameof(ActiveDownloads));
+                        if (p.Phase == DownloadPhase.Completed)
+                        {
+                            if (_jobIdentity.TryGetValue(id, out var identity) && p.FilePath is { Length: > 0 })
+                                RecordHistory(identity.Title, identity.Artist, p.FilePath,
+                                    _jobProvider.TryGetValue(id, out var provName) ? provName : "MusicEngine");
+                            if (_config.DownloadToasts)
+                                PushToast(new ToastViewModel { Title = "Download complete", Message = item.Title, FilePath = p.FilePath });
+                        }
+                        else if (p.Phase is DownloadPhase.Failed or DownloadPhase.Cancelled)
+                        {
+                            // Allow retry: remove from queued works so user can re-download
+                            if (_jobIdentity.TryGetValue(id, out var failedIdentity))
+                            {
+                                var key = $"{failedIdentity.Title}|{failedIdentity.Artist}".Trim();
+                                _queuedWorks.Remove(key);
+                            }
+                            if (p.Phase == DownloadPhase.Failed && _config.DownloadToasts)
+                                PushToast(new ToastViewModel { Title = "Download failed", Message = item.Title, IsError = true });
+                        }
+                    }
+                });
+                _downloads.JobStarted += (id, providerName) => _jobProvider[id] = providerName;
+
+        _playerTimer = new System.Threading.Timer(_ => _ui.Run(UpdatePlayerPosition), null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+                _toastTimer = new System.Threading.Timer(_ => _ui.Run(AgeToasts), null, 1000, 1000);
+                _clipboardTimer = new System.Threading.Timer(_ => _ui.Run(CheckClipboard), null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+                if (_config.ClipboardMonitor) _clipboardTimer.Change(1200, 1200);
             }
-        });
-        _downloads.JobStarted += (id, providerName) => _jobProvider[id] = providerName;
 
-        _playerTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-        _playerTimer.Tick += (_, _) => UpdatePlayerPosition();
-        _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        _toastTimer.Tick += (_, _) => AgeToasts();
-        _toastTimer.Start();
-        _clipboardTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.2) };
-        _clipboardTimer.Tick += (_, _) => CheckClipboard();
-        if (_config.ClipboardMonitor) _clipboardTimer.Start();
-    }
-
-    public void SetClipboardMonitor(bool enabled)
-    {
-        if (enabled) _clipboardTimer.Start();
-        else { _clipboardTimer.Stop(); ClipboardPill = ""; }
-    }
+            public void SetClipboardMonitor(bool enabled)
+            {
+                if (enabled) _clipboardTimer.Change(1200, 1200);
+                else { _clipboardTimer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite); ClipboardPill = ""; }
+            }
 
     // ---------------- search ----------------
 
@@ -239,53 +243,53 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
 
         StopPreview();
         _state.PushSearch(query);
-        var offline = _providers.OfflineSources;
-        RunOnUi(() =>
-        {
-            RecentSearches.Clear();
-            foreach (var r in _state.RecentSearches.Take(8)) RecentSearches.Add(r);
-            Results.Clear();
-            ResultsView.Clear();
-            HasResults = false;
-            IsSearching = true;
-            Status = offline.Count > 0
-                ? $"Searching “{query}”… · unreachable: {string.Join(", ", offline)}"
-                : $"Searching “{query}”…";
-        });
+                var offline = _providers.OfflineSources;
+                _ui.Run(() =>
+                {
+                    RecentSearches.Clear();
+                    foreach (var r in _state.RecentSearches.Take(8)) RecentSearches.Add(r);
+                    Results.Clear();
+                    ResultsView.Clear();
+                    HasResults = false;
+                    IsSearching = true;
+                    Status = offline.Count > 0
+                        ? $"Searching “{query}”… · unreachable: {string.Join(", ", offline)}"
+                        : $"Searching “{query}”…";
+                });
 
-        var search = new SearchService(
-            _providers.EnabledSearchProviders(),
-            _health, _cache, null, _config.SearchTimeoutSeconds);
+                var search = new SearchService(
+                    _providers.EnabledSearchProviders(),
+                    _health, _cache, null, _config.SearchTimeoutSeconds);
 
-        var started = Stopwatch.StartNew();
-        var cb = new SearchService.Callbacks
-        {
-            Status = s => RunOnUi(() => Status = s),
-            Batch = batch => RunOnUi(() => ApplyResults(batch)),
-        };
+                var started = Stopwatch.StartNew();
+                var cb = new SearchService.Callbacks
+                {
+                    Status = s => _ui.Run(() => Status = s),
+                    Batch = batch => _ui.Run(() => ApplyResults(batch)),
+                };
 
-        try
-        {
-            var works = await search.RunAsync(query, cb, ct).ConfigureAwait(true);
-            RunOnUi(() =>
-            {
-                ApplyResults(works);
-                if (works.Count == 0)
-                    Status = "No results — try another spelling, or check the proxy (YouTube needs it on filtered networks)";
-            });
-        }
-        catch (OperationCanceledException)
-        {
-            RunOnUi(() => Status = "Search cancelled");
-        }
-        catch (Exception ex)
-        {
-            RunOnUi(() => Status = $"Search error: {ex.Message}");
-        }
-        finally
-        {
-            RunOnUi(() => IsSearching = false);
-        }
+                try
+                {
+                    var works = await search.RunAsync(query, cb, ct).ConfigureAwait(true);
+                    _ui.Run(() =>
+                    {
+                        ApplyResults(works);
+                        if (works.Count == 0)
+                            Status = "No results — try another spelling, or check the proxy (YouTube needs it on filtered networks)";
+                    });
+                }
+                catch (OperationCanceledException)
+                {
+                    _ui.Run(() => Status = "Search cancelled");
+                }
+                catch (Exception ex)
+                {
+                    _ui.Run(() => Status = $"Search error: {ex.Message}");
+                }
+                finally
+                {
+                    _ui.Run(() => IsSearching = false);
+                }
     }
 
     /// <summary>
@@ -356,40 +360,40 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
                 PlayerTitle = track.Title;
                 PlayerArtist = track.Artist;
                 PlayerArtwork = track.Artwork;
-                OnPropertyChanged(nameof(IsPreviewPlaying));
-                _playerTimer.Start();
-            },
-            onStopped: () =>
-            {
-                track.IsPreviewPlaying = false;
-                if (ReferenceEquals(_playingTrack, track))
-                {
-                    _playingTrack = null;
-                    NowPlaying = null;
-                    OnPropertyChanged(nameof(IsPreviewPlaying));
-                }
-                _playerTimer.Stop();
-            });
+                                OnPropertyChanged(nameof(IsPreviewPlaying));
+                                _playerTimer.Change(250, 250);
+                            },
+                            onStopped: () =>
+                            {
+                                track.IsPreviewPlaying = false;
+                                if (ReferenceEquals(_playingTrack, track))
+                                {
+                                    _playingTrack = null;
+                                    NowPlaying = null;
+                                    OnPropertyChanged(nameof(IsPreviewPlaying));
+                                }
+                                _playerTimer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+                            });
     }
 
     public void SeekPreview(double seconds) => _preview.Seek(TimeSpan.FromSeconds(seconds));
 
     public void StopPreview()
-    {
-        _playingTrack?.Let(t => t.IsPreviewPlaying = false);
-        _playingTrack = null;
-        _preview.Stop();
-        NowPlaying = null;
-        OnPropertyChanged(nameof(IsPreviewPlaying));
-        _playerTimer.Stop();
-    }
+        {
+            _playingTrack?.Let(t => t.IsPreviewPlaying = false);
+            _playingTrack = null;
+            _preview.Stop();
+            NowPlaying = null;
+            OnPropertyChanged(nameof(IsPreviewPlaying));
+            _playerTimer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+        }
 
-    private void UpdatePlayerPosition()
-    {
-        PlayerDuration = Math.Max(1, _preview.Duration.TotalSeconds);
-        PlayerPosition = _preview.Position.TotalSeconds;
-        OnPropertyChanged(nameof(PlayerTime));
-    }
+        private void UpdatePlayerPosition()
+        {
+            PlayerDuration = Math.Max(1, _preview.Duration.TotalSeconds);
+            PlayerPosition = _preview.Position.TotalSeconds;
+            OnPropertyChanged(nameof(PlayerTime));
+        }
 
     // ---------------- downloads ----------------
 
@@ -449,26 +453,26 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
     }
 
     /// <summary>Record a finished download into the persisted history and flag matching results.</summary>
-    public void RecordHistory(string title, string artist, string filePath, string provider)
-    {
-        _state.PushHistory(new HistoryEntry(title, artist, filePath, provider, DateTimeOffset.Now));
-        RunOnUi(() =>
-        {
-            History.Insert(0, new HistoryItemViewModel
+            public void RecordHistory(string title, string artist, string filePath, string provider)
             {
-                Title = title, Artist = artist, FilePath = filePath, Provider = provider, At = DateTimeOffset.Now,
-            });
-            var match = Results.FirstOrDefault(r =>
-                string.Equals(r.Title, title, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(r.Artist, artist, StringComparison.OrdinalIgnoreCase));
-            if (match is not null)
-            {
-                match.IsInLibrary = true;
-                match.OnPropertyChanged(nameof(match.LibraryBadge));
-                if (HideInLibrary) RebuildResultsView();
+                _state.PushHistory(new HistoryEntry(title, artist, filePath, provider, DateTimeOffset.Now));
+                _ui.Run(() =>
+                {
+                    History.Insert(0, new HistoryItemViewModel
+                    {
+                        Title = title, Artist = artist, FilePath = filePath, Provider = provider, At = DateTimeOffset.Now,
+                    });
+                    // Match by stable DedupKey instead of fragile title/artist strings
+                    var key = $"{title}|{artist}".Trim();
+                    var match = Results.FirstOrDefault(r => r.Work.Representative.DedupKey == key);
+                    if (match is not null)
+                    {
+                        match.IsInLibrary = true;
+                        match.OnPropertyChanged(nameof(match.LibraryBadge));
+                        if (HideInLibrary) RebuildResultsView();
+                    }
+                });
             }
-        });
-    }
 
     // ---------------- toasts ----------------
 
@@ -536,49 +540,49 @@ public sealed class MainViewModel : ViewModelBase, IDisposable
     }
 
     private void LoadArtwork(TrackItemViewModel item)
-    {
-        var uri = item.Work.Representative.Metadata.ArtworkUri;
-        if (uri is null) return;
-        _ = Task.Run(async () =>
         {
-            try
+            var uri = item.Work.Representative.Metadata.ArtworkUri;
+            if (uri is null) return;
+            _ = Task.Run(async () =>
             {
-                using var resp = await _http.Create("Artwork").GetAsync(uri).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode) return;
-                using var ms = new MemoryStream(await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false));
-                var bmp = new BitmapImage();
-                bmp.BeginInit();
-                bmp.CacheOption = BitmapCacheOption.OnLoad;
-                bmp.DecodePixelWidth = 128;
-                bmp.StreamSource = ms;
-                bmp.EndInit();
-                bmp.Freeze();
-                RunOnUi(() =>
+                try
                 {
-                    item.Artwork = bmp;
-                    if (ReferenceEquals(item, NowPlaying)) PlayerArtwork = bmp;
-                });
-            }
-            catch { /* placeholder stays */ }
-        });
-    }
+                    var bytes = await _artwork.LoadAsync(uri).ConfigureAwait(false);
+                    if (bytes is null || bytes.Length == 0) return;
+                    _ui.Run(() =>
+                    {
+                        var bmp = BitmapImageFromBytes(bytes);
+                        item.Artwork = bmp;
+                        if (ReferenceEquals(item, NowPlaying)) PlayerArtwork = bmp;
+                    });
+                }
+                catch { /* placeholder stays */ }
+            });
+        }
 
-    internal static void RunOnUi(Action action)
-    {
-        var dispatcher = System.Windows.Application.Current?.Dispatcher;
-        if (dispatcher is null || dispatcher.CheckAccess()) action();
-        else dispatcher.BeginInvoke(action);
-    }
+        private BitmapImage BitmapImageFromBytes(byte[] bytes)
+        {
+            using var ms = new MemoryStream(bytes);
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.DecodePixelWidth = 128;
+            bmp.StreamSource = ms;
+            bmp.EndInit();
+            bmp.Freeze();
+            return bmp;
+        }
 
-    public void Dispose()
-    {
-        // A search in flight may race the shutdown — dispose-vs-cancel is benign.
-        try { _searchCts?.Cancel(); } catch (ObjectDisposedException) { }
-        try { _searchCts?.Dispose(); } catch (ObjectDisposedException) { }
-        StopPreview();
-        _toastTimer.Stop();
-        _clipboardTimer.Stop();
-    }
+        public void Dispose()
+        {
+            // A search in flight may race the shutdown — dispose-vs-cancel is benign.
+            try { _searchCts?.Cancel(); } catch (ObjectDisposedException) { }
+            try { _searchCts?.Dispose(); } catch (ObjectDisposedException) { }
+            StopPreview();
+            _toastTimer.Dispose();
+            _clipboardTimer.Dispose();
+            _playerTimer.Dispose();
+        }
 }
 
 internal static class FunctionalExtensions

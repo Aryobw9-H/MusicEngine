@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using Configuration;
 using Downloads;
 using Microsoft.Extensions.Logging;
@@ -182,82 +183,120 @@ public sealed class YtDlpProvider : IDownloadProvider, ISearchProvider
     }
 
     private async Task<DownloadResult> DownloadOnceAsync(
-        SearchResult track, DownloadOptions options,
-        IProgress<DownloadProgress>? progress, CancellationToken ct)
-    {
-        var finalName = FileNaming.Build(options.TagTemplate, track, _ffmpegPath is null ? "" : ".mp3", options.FilenameTemplate);
-        var finalPath = Path.Combine(options.OutputDirectory, finalName);
-
-        // Work dir under the OUTPUT directory (a real Windows path — never
-        // Path.GetTempPath(), which inherits MSYS TMP quirks from git-bash launches).
-        var workDir = Path.Combine(options.OutputDirectory, ".ytdlp-" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(workDir);
-
-        var template = Path.Combine(workDir, "%(title)s [%(id)s].%(ext)s");
-        var stderr = new StringBuilder();
-
-        progress?.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null, "yt-dlp: resolving streams"));
-        var result = await CliWrap.Cli.Wrap(_ytDlpPath)
-            .WithArguments(b =>
-            {
-                b.Add(BuildTarget(track))
-                 .Add("-x")
-                 .Add("--audio-format").Add("mp3")
-                 .Add("--audio-quality").Add($"{options.MaxBitrateKbps}K")
-                 .Add("-f").Add("140/bestaudio[ext=m4a]/bestaudio/best")
-                 .Add("--newline").Add("--progress")
-                 .Add("--no-playlist").Add("--no-warnings")
-                 .Add("--remote-components").Add(RemoteComponents)
-                 .Add("--concurrent-fragments").Add("4")       // parallel segment fetch
-                 .Add("--http-chunk-size").Add("10M")          // dodge per-chunk throttling
-                 .Add("--retries").Add("3").Add("--fragment-retries").Add("3")
-                 .Add("--buffer-size").Add("16K")
-                 .Add("-o").Add(template);
-                if (_ffmpegPath is not null)
-                {
-                    b.Add("--ffmpeg-location").Add(_ffmpegPath)
-                     .Add("--embed-thumbnail").Add("--add-metadata");
-                }
-                if (_proxyUrl is not null) b.Add("--proxy").Add(_proxyUrl);
-                if (_cookiesBrowser is not null) b.Add("--cookies-from-browser").Add(_cookiesBrowser);
-            })
-            .WithStandardErrorPipe(CliWrap.PipeTarget.ToStringBuilder(stderr))
-            .WithStandardOutputPipe(new ProgressPipeTarget(progress))
-            .WithValidation(CliWrap.CommandResultValidation.None)
-            .ExecuteAsync(ct).ConfigureAwait(false);
-
-        if (result.ExitCode != 0)
+            SearchResult track, DownloadOptions options,
+            IProgress<DownloadProgress>? progress, CancellationToken ct)
         {
-            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
-            var err = stderr.ToString();
-            throw new InvalidOperationException($"yt-dlp failed: {(err.Length > 400 ? err[..400] : err)}");
+            var finalName = FileNaming.Build(options.TagTemplate, track, _ffmpegPath is null ? "" : ".mp3", options.FilenameTemplate);
+            var finalPath = Path.Combine(options.OutputDirectory, finalName);
+
+            // Work dir under the OUTPUT directory (a real Windows path — never
+            // Path.GetTempPath(), which inherits MSYS TMP quirks from git-bash launches).
+            var workDir = Path.Combine(options.OutputDirectory, ".ytdlp-" + Guid.NewGuid().ToString("N")[..8]);
+            Directory.CreateDirectory(workDir);
+
+            var template = Path.Combine(workDir, "%(title)s [%(id)s].%(ext)s");
+            var stderr = new StringBuilder();
+
+            progress?.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null, "yt-dlp: resolving streams"));
+        
+            // Use Process directly for reliable cancellation (CliWrap doesn't kill child on cancel)
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = _ytDlpPath,
+                Arguments = BuildYtDlpArgs(track, options, template),
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardErrorEncoding = Encoding.UTF8,
+                StandardOutputEncoding = Encoding.UTF8,
+            };
+        
+            using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            var tcs = new TaskCompletionSource<Process>();
+            process.Exited += (_, _) => tcs.TrySetResult(process);
+        
+            if (!process.Start())
+                throw new InvalidOperationException("Failed to start yt-dlp process");
+        
+            // Register cancellation to kill the process
+            using var cancelReg = ct.Register(() =>
+            {
+                try { if (!process.HasExited) process.Kill(true); } catch { }
+            });
+        
+            // Read stderr/stdout for progress
+            var stderrTask = ReadStreamAsync(process.StandardError, stderr, progress, ct);
+            var stdoutTask = ReadStreamAsync(process.StandardOutput, null, progress, ct);
+        
+            var exitedTask = tcs.Task;
+            var completedTask = await Task.WhenAny(exitedTask, Task.Delay(Timeout.Infinite, ct)).ConfigureAwait(false);
+        
+            if (completedTask != exitedTask)
+            {
+                // Cancellation fired — process.Kill was called via cancelReg
+                try { if (!process.HasExited) process.Kill(true); } catch { }
+                await exitedTask.ConfigureAwait(false); // wait for exit after kill
+                ct.ThrowIfCancellationRequested();
+            }
+        
+            await stderrTask.ConfigureAwait(false);
+            await stdoutTask.ConfigureAwait(false);
+
+            if (process.ExitCode != 0)
+            {
+                try { Directory.Delete(workDir, recursive: true); } catch { }
+                var err = stderr.ToString();
+                throw new InvalidOperationException($"yt-dlp failed: {(err.Length > 400 ? err[..400] : err)}");
+            }
+
+            // Find the produced audio by globbing (robust against path quirks).
+            var outputPath = Directory.GetFiles(workDir, "*.*")
+                .FirstOrDefault(f => Path.GetExtension(f) is ".mp3" or ".m4a" or ".opus" or ".webm" or ".mkv");
+            if (outputPath is null)
+                throw new InvalidOperationException("yt-dlp finished but produced no audio file.");
+
+            File.Move(outputPath, finalPath, overwrite: true);
+            try { Directory.Delete(workDir, recursive: true); } catch { }
+
+            var size = new FileInfo(finalPath).Length;
+            progress?.Report(new DownloadProgress(DownloadPhase.Tagging, size, size, "Tagged by yt-dlp"));
+            return new DownloadResult(finalPath, StreamQuality.High192K, ProviderId.YtDlp);
         }
 
-        // Find the produced audio by globbing (robust against path quirks).
-        var outputPath = Directory.GetFiles(workDir, "*.*")
-            .FirstOrDefault(f => Path.GetExtension(f) is ".mp3" or ".m4a" or ".opus" or ".webm" or ".mkv");
-        if (outputPath is null)
-            throw new InvalidOperationException("yt-dlp finished but produced no audio file.");
-
-        File.Move(outputPath, finalPath, overwrite: true);
-        try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
-
-        var size = new FileInfo(finalPath).Length;
-        progress?.Report(new DownloadProgress(DownloadPhase.Tagging, size, size, "Tagged by yt-dlp"));
-        return new DownloadResult(finalPath, StreamQuality.High192K, ProviderId.YtDlp);
-    }
-
-    /// <summary>
-    /// Consumes yt-dlp stdout line-by-line: "[download]  12.3% of …" becomes live
-    /// progress reports, "[ExtractAudio]" becomes the converting phase.
-    /// </summary>
-    private sealed class ProgressPipeTarget(IProgress<DownloadProgress>? progress) : CliWrap.PipeTarget
-    {
-        public override async Task CopyFromAsync(System.IO.Stream source, CancellationToken cancellationToken)
+        private string BuildYtDlpArgs(SearchResult track, DownloadOptions options, string template)
         {
-            using var reader = new System.IO.StreamReader(source, System.Text.Encoding.UTF8);
-            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            var args = new List<string>
             {
+                BuildTarget(track),
+                "-x",
+                "--audio-format", "mp3",
+                "--audio-quality", $"{options.MaxBitrateKbps}K",
+                "-f", "140/bestaudio[ext=m4a]/bestaudio/best",
+                "--newline", "--progress",
+                "--no-playlist", "--no-warnings",
+                "--remote-components", RemoteComponents,
+                "--concurrent-fragments", "4",
+                "--http-chunk-size", "10M",
+                "--retries", "3", "--fragment-retries", "3",
+                "--buffer-size", "16K",
+                "-o", template,
+            };
+            if (_ffmpegPath is not null)
+            {
+                args.Add("--ffmpeg-location"); args.Add(_ffmpegPath);
+                args.Add("--embed-thumbnail"); args.Add("--add-metadata");
+            }
+            if (_proxyUrl is not null) { args.Add("--proxy"); args.Add(_proxyUrl); }
+            if (_cookiesBrowser is not null) { args.Add("--cookies-from-browser"); args.Add(_cookiesBrowser); }
+            return string.Join(" ", args.Select(a => a.Contains(' ') ? $"\"{a}\"" : a));
+        }
+
+        private static async Task ReadStreamAsync(StreamReader reader, StringBuilder? collector, IProgress<DownloadProgress>? progress, CancellationToken ct)
+        {
+            while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
+            {
+                if (collector is not null) collector.AppendLine(line);
                 if (progress is null) continue;
                 var m = ProgressRegex.Match(line);
                 if (m.Success && double.TryParse(m.Groups[1].Value, out var pct))
@@ -271,7 +310,6 @@ public sealed class YtDlpProvider : IDownloadProvider, ISearchProvider
                 }
             }
         }
-    }
 
     private static string? GetStr(JsonElement e, string key) =>
         e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;

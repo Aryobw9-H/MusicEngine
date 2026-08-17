@@ -53,9 +53,12 @@ public sealed class SharedHttpClient : IDisposable
                 {
                     PooledConnectionLifetime = TimeSpan.FromMinutes(2),
                     AutomaticDecompression = DecompressionMethods.All,
-                    Proxy = new WebProxy(_proxyUrl, BypassOnLocal: true),
-                    UseProxy = true,
                 };
+                if (TryParseProxyUrl(_proxyUrl, out var proxyUri))
+                {
+                    viaProxy.Proxy = new WebProxy(proxyUri, BypassOnLocal: true);
+                    viaProxy.UseProxy = true;
+                }
                 if (insecureTls)
                 {
                     direct.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
@@ -75,8 +78,11 @@ public sealed class SharedHttpClient : IDisposable
             };
             if (proxied && !string.IsNullOrEmpty(_proxyUrl))
             {
-                handler.Proxy = new WebProxy(_proxyUrl, BypassOnLocal: true);
-                handler.UseProxy = true;
+                if (TryParseProxyUrl(_proxyUrl, out var proxyUri))
+                {
+                    handler.Proxy = new WebProxy(proxyUri, BypassOnLocal: true);
+                    handler.UseProxy = true;
+                }
             }
             if (insecureTls)
                 handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
@@ -85,6 +91,22 @@ public sealed class SharedHttpClient : IDisposable
                 Timeout = TimeSpan.FromSeconds(30),
             };
         });
+    }
+
+    private static bool TryParseProxyUrl(string proxyUrl, out Uri proxyUri)
+    {
+        proxyUri = null!;
+        try
+        {
+            var uri = new Uri(proxyUrl);
+            if (uri.Port > 0 && uri.Port <= 65535)
+            {
+                proxyUri = uri;
+                return true;
+            }
+        }
+        catch { }
+        return false;
     }
 
     /// <summary>Apply realistic browser default headers to a client (idempotent).</summary>
