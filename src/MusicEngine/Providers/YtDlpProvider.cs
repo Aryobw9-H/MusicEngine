@@ -33,17 +33,19 @@ public sealed class YtDlpProvider : IDownloadProvider, ISearchProvider
     private readonly string? _ffmpegPath;
     private readonly string? _proxyUrl;
     private readonly string? _cookiesBrowser;
+    private readonly string? _cookiesFile;
 
     public ProviderId Id => ProviderId.YtDlp;
     public string DisplayName => "yt-dlp";
     public SearchTier Tier => SearchTier.DownloadOnly;
     public bool IsAvailable => _ytDlpPath is not null;
 
-    public YtDlpProvider(AppConfig config, ILogger<YtDlpProvider>? logger = null)
+    public YtDlpProvider(Configuration.ISettings config, ILogger<YtDlpProvider>? logger = null)
     {
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<YtDlpProvider>.Instance;
         _proxyUrl = config.ProxyUrl;
         _cookiesBrowser = config.CookiesBrowser;
+        _cookiesFile = config.CookiesFile;
         try { _ytDlpPath = ResolveBinary(config.YtDlpPath ?? Environment.GetEnvironmentVariable("YTDLP_PATH"), "yt-dlp.exe"); }
         catch (FileNotFoundException ex)
         {
@@ -135,6 +137,15 @@ public sealed class YtDlpProvider : IDownloadProvider, ISearchProvider
                 return await DownloadOnceAsync(track, options, progress, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (IsBotCheck(ex))
+            {
+                // IP-level block: retrying burns ~10s and always fails the same
+                // way. Fail fast and tell the user the one thing that fixes it.
+                throw new InvalidOperationException(
+                    "YouTube blocked yt-dlp (bot check). Set \"cookiesBrowser\": \"chrome\" " +
+                    "(or \"edge\"/\"firefox\") — or export a cookies.txt and set \"cookiesFile\" — " +
+                    "in appsettings.json next to the app.");
+            }
             catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex))
             {
                 last = ex;
@@ -148,12 +159,17 @@ public sealed class YtDlpProvider : IDownloadProvider, ISearchProvider
         throw last ?? new InvalidOperationException("yt-dlp download failed.");
     }
 
-    private static bool IsTransient(Exception ex) => ex.Message.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase)
-        || ex.Message.Contains("bot", StringComparison.OrdinalIgnoreCase)
-        || ex.Message.Contains("429", StringComparison.OrdinalIgnoreCase)
-        || ex.Message.Contains("403", StringComparison.OrdinalIgnoreCase)
-        || ex.Message.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
-        || ex.Message.Contains("Read timed out", StringComparison.OrdinalIgnoreCase);
+    /// <summary>YouTube's "Sign in to confirm you're not a bot" — a hard IP-level
+    /// block that retries cannot fix (only cookies can).</summary>
+    private static bool IsBotCheck(Exception ex) =>
+        ex.Message.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("not a bot", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTransient(Exception ex) => !IsBotCheck(ex)
+        && (ex.Message.Contains("429", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("403", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("Read timed out", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Download target: the track's URL when yt-dlp understands the host, else a
@@ -288,7 +304,16 @@ public sealed class YtDlpProvider : IDownloadProvider, ISearchProvider
                 args.Add("--embed-thumbnail"); args.Add("--add-metadata");
             }
             if (_proxyUrl is not null) { args.Add("--proxy"); args.Add(_proxyUrl); }
-            if (_cookiesBrowser is not null) { args.Add("--cookies-from-browser"); args.Add(_cookiesBrowser); }
+            // A cookies.txt export wins over the browser DB (a file works even
+            // while the browser is running, which locks the DB on Windows).
+            if (_cookiesFile is { Length: > 0 } && File.Exists(_cookiesFile))
+            {
+                args.Add("--cookies"); args.Add(_cookiesFile);
+            }
+            else if (_cookiesBrowser is { Length: > 0 })
+            {
+                args.Add("--cookies-from-browser"); args.Add(_cookiesBrowser);
+            }
             return string.Join(" ", args.Select(a => a.Contains(' ') ? $"\"{a}\"" : a));
         }
 
@@ -322,17 +347,21 @@ public sealed class YtDlpProvider : IDownloadProvider, ISearchProvider
         if (!string.IsNullOrWhiteSpace(explicitPath) && File.Exists(explicitPath)) return explicitPath;
         var local = Path.Combine(AppContext.BaseDirectory, "Tools", name);
         if (File.Exists(local)) return local;
-        try
+        // In-process PATH scan instead of shelling out to `where` (BUG-05):
+        // faster and no subprocess during DI construction. Try both the exact
+        // name ("yt-dlp.exe") and the bare name ("yt-dlp") for other OSes.
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
-            using var p = Process.Start(new ProcessStartInfo("where", Path.GetFileNameWithoutExtension(name))
+            foreach (var candidate in new[]
+                     {
+                         Path.Combine(dir.Trim(), name),
+                         Path.Combine(dir.Trim(), Path.GetFileNameWithoutExtension(name)),
+                     })
             {
-                RedirectStandardOutput = true,
-                CreateNoWindow = true,
-            });
-            var first = p?.StandardOutput.ReadLine();
-            if (!string.IsNullOrEmpty(first) && File.Exists(first)) return first;
+                if (File.Exists(candidate)) return candidate;
+            }
         }
-        catch { /* where failed */ }
         throw new FileNotFoundException($"{name} not found. Place it in <app>/Tools/, add to PATH, or set it in appsettings.json.", name);
     }
 }

@@ -9,7 +9,8 @@ public sealed record GoalSong(
     string Artist,
     string Title,
     TimeSpan? Duration,
-    ProviderId Source);
+    ProviderId Source,
+    string? Album = null);
 
 /// <summary>A labelled copy of a work (Original / Remix / Live / …) with its rank score.</summary>
 public sealed record TrackVersion(

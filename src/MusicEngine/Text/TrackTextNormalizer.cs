@@ -221,7 +221,7 @@ public static class TrackTextNormalizer
         {
             var n = Spaceless(nk);
             if (n.Length < 4) continue;
-            foreach (var hk in MatchKeys(haystack))
+            foreach (var hk in MatchKeys(haystack ?? ""))
                 if (Spaceless(hk).Contains(n, StringComparison.Ordinal)) return true;
         }
         return false;

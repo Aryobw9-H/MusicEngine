@@ -25,14 +25,24 @@ public sealed class ProviderRegistry
     public PersianSitesProvider PersianSites { get; }
     public PersianIndexProvider? PersianIndex { get; }
     public YtDlpProvider YtDlp { get; }
+    public RozMusicProvider RozMusic { get; }
+    public MusicDelProvider MusicDel { get; }
+    public BehMelodyProvider BehMelody { get; }
+    public Melody98Provider Melody98 { get; }
+    public AparatProvider Aparat { get; }
 
-    private readonly AppConfig _config;
+    public BiaMusicProvider BiaMusic { get; }
+
+    public BeatMasteringProvider BeatMastering { get; }
+    public MusicsFaProvider MusicsFa { get; }
+
+    private readonly Configuration.ISettings _config;
     private readonly Reachability _reach;
     private readonly HashSet<ProviderId> _offline = new();
     private readonly object _offlineLock = new();
 
     public ProviderRegistry(
-        AppConfig config,
+        Configuration.ISettings config,
         Reachability reachability,
         ITunesProvider iTunes,
         DeezerProvider deezer,
@@ -42,8 +52,20 @@ public sealed class ProviderRegistry
         Nex1MusicProvider nex1Music,
         PersianSitesProvider persianSites,
         PersianIndexProvider? persianIndex,
-        YtDlpProvider ytDlp)
+        YtDlpProvider ytDlp,
+        RozMusicProvider rozMusic,
+        MusicDelProvider musicDel,
+        BehMelodyProvider behMelody,
+        Melody98Provider melody98,
+        AparatProvider aparat,
+
+        BiaMusicProvider biaMusic,
+
+        BeatMasteringProvider beatMastering,
+
+        MusicsFaProvider musicsFa)
     {
+        ArgumentNullException.ThrowIfNull(config);
         _config = config;
         _reach = reachability;
         ITunes = iTunes;
@@ -55,6 +77,17 @@ public sealed class ProviderRegistry
         PersianSites = persianSites;
         PersianIndex = persianIndex;
         YtDlp = ytDlp;
+        RozMusic = rozMusic;
+        MusicDel = musicDel;
+        BehMelody = behMelody;
+        Melody98 = melody98;
+        Aparat = aparat;
+
+        BiaMusic = biaMusic;
+
+        BeatMastering = beatMastering;
+
+        MusicsFa = musicsFa;
     }
 
     /// <summary>Display names of sources currently unreachable (direct AND proxied).</summary>
@@ -74,7 +107,7 @@ public sealed class ProviderRegistry
 
     private IEnumerable<IMusicProvider> AllProviders()
     {
-        var all = new List<IMusicProvider> { ITunes, Deezer, YouTube, SoundCloud, RadioJavan, Nex1Music, PersianSites, YtDlp };
+        var all = new List<IMusicProvider> { ITunes, Deezer, YouTube, SoundCloud, RadioJavan, Nex1Music, PersianSites, YtDlp, RozMusic, MusicDel, BehMelody, Melody98, Aparat, BiaMusic, BeatMastering, MusicsFa };
         if (PersianIndex is not null) all.Add(PersianIndex);
         return all;
     }
@@ -123,16 +156,17 @@ public sealed class ProviderRegistry
         }
     }
 
-    /// <summary>Every available download provider (source toggles do not gate the
-    /// fallback chain; dead hosts do).</summary>
+    /// <summary>Every available download provider. Source toggles do not gate
+    /// the fallback chain. Route-probe offline status is IGNORED here —
+    /// domestic CDN downloads must always be attempted even when the probe
+    /// fails (probes use ICMP/TCP pings that ISPs often block, but actual
+    /// HTTP downloads work fine). Only the native provider chain decides
+    /// whether a source is usable.</summary>
     public IReadOnlyList<IDownloadProvider> DownloadProviders()
     {
-        lock (_offlineLock)
-        {
-            return AllProviders()
-                .OfType<IDownloadProvider>()
-                .Where(p => p.IsAvailable && !_offline.Contains(p.Id))
-                .ToList();
-        }
+        return AllProviders()
+            .OfType<IDownloadProvider>()
+            .Where(p => p.IsAvailable)
+            .ToList();
     }
 }

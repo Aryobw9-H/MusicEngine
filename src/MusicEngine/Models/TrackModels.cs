@@ -9,6 +9,11 @@ public sealed class TrackMetadata
     public string Title { get; init; } = "";
     public string Artist { get; init; } = "";
     public string? Album { get; init; }
+    /// <summary>Provider-native album id (iTunes collectionId, Deezer album id,
+    /// Radio Javan album id) — the key that groups an album's tracks.</summary>
+    public string? AlbumId { get; init; }
+    /// <summary>Position within the album (1-based), when the source provides it.</summary>
+    public int? TrackNumber { get; init; }
     public TimeSpan? Duration { get; init; }
     public Uri? ArtworkUri { get; init; }
     public DateTimeOffset? ReleaseDate { get; init; }

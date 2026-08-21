@@ -11,9 +11,41 @@
         TextOptions.TextFormattingMode="Ideal"
         Closing="Window_Closing">
     <Window.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
-        <local:InverseBoolToVisibility x:Key="InverseBoolToVis"/>
         <local:StringToVisibility x:Key="StringToVis"/>
+
+        <!-- Albums search toggle: ghost button that fills with the accent when on -->
+        <Style x:Key="AlbumToggle" TargetType="ToggleButton">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="12,4"/>
+            <Setter Property="Margin" Value="2,0,4,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource SubtleTextBrush}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                CornerRadius="8" Padding="{TemplateBinding Padding}"
+                                VerticalAlignment="Center">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                <Setter Property="Foreground" Value="#0B0E12"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <!-- entrance animation for result cards -->
         <Storyboard x:Key="CardIn">
@@ -81,23 +113,30 @@
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <TextBox x:Name="SearchBox" Grid.Column="0" Style="{StaticResource Input}"
-                             Text="{Binding Query, UpdateSourceTrigger=PropertyChanged}"
-                             KeyDown="SearchBox_KeyDown"/>
+                             Text="{Binding Query, UpdateSourceTrigger=PropertyChanged}">
+                        <TextBox.InputBindings>
+                            <KeyBinding Key="Enter" Command="{Binding SearchCommand}"/>
+                        </TextBox.InputBindings>
+                    </TextBox>
                     <TextBlock Grid.Column="0" Text="Search any song — tataloo behesht ، تتلو بهشت ، or paste a link"
                                Foreground="{StaticResource FaintTextBrush}" FontSize="13.5"
                                VerticalAlignment="Center" Margin="14,0,0,0" IsHitTestVisible="False"
                                Visibility="{Binding Query, Converter={StaticResource StringToVis}, ConverterParameter=inverse}"/>
                     <Button x:Name="RecentsBtn" Grid.Column="1" Style="{StaticResource BtnGhost}" Content="⏷"
-                            FontSize="12" Margin="4,0,0,0" Click="Recents_Click" ToolTip="Recent searches"/>
+                            FontSize="12" Margin="4,0,0,0" Command="{Binding ToggleRecentsCommand}" ToolTip="Recent searches"/>
                     <Button x:Name="ClearQueryBtn" Grid.Column="2" Style="{StaticResource BtnGhost}" Content="✕"
                             FontSize="12" Margin="2,0,4,0" Click="ClearQuery_Click" ToolTip="Clear"
                             Visibility="{Binding Query, Converter={StaticResource StringToVis}}"/>
-                    <Button Grid.Column="3" Content="Search" Style="{StaticResource BtnAccent}" Click="Search_Click"/>
+                    <ToggleButton Grid.Column="3" Style="{StaticResource AlbumToggle}" Content="Albums"
+                                  IsChecked="{Binding AlbumsOnly}"
+                                  ToolTip="Search for a whole album — e.g. “tataloo jahanam”, “fadaei hagh”, “bahram sokoot”"/>
+                    <Button Grid.Column="4" Content="Search" Style="{StaticResource BtnAccent}" Command="{Binding SearchCommand}"/>
 
                     <Popup x:Name="RecentsPopup" PlacementTarget="{Binding ElementName=SearchBox}" Placement="Bottom"
-                           AllowsTransparency="True" StaysOpen="False" PopupAnimation="Fade">
+                           AllowsTransparency="True" StaysOpen="False" PopupAnimation="Fade" IsOpen="{Binding IsRecentsOpen}">
                         <Border Background="{StaticResource PanelBrush}" CornerRadius="10"
                                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Margin="0,5,0,0"
                                 MinWidth="280" MaxWidth="460" Padding="6">
@@ -109,7 +148,8 @@
                                         <DataTemplate>
                                             <Button Style="{StaticResource BtnGhost}" HorizontalAlignment="Stretch"
                                                     HorizontalContentAlignment="Left" Padding="8,7"
-                                                    Click="Recent_Click">
+                                                    Command="{Binding DataContext.SearchRecentCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                    CommandParameter="{Binding}">
                                                 <TextBlock Text="{Binding}" TextTrimming="CharacterEllipsis"/>
                                             </Button>
                                         </DataTemplate>
@@ -121,7 +161,10 @@
                 </Grid>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
-                    <Button Content="⚙  Settings" Style="{StaticResource Btn}" Command="{Binding OpenSettingsCommand}"/>
+                    <Button Content="📋  Paste list" Style="{StaticResource Btn}" Command="{Binding OpenBatchCommand}"
+                            ToolTip="Queue many songs at once — one per line"/>
+                    <Button Content="⚙  Settings" Style="{StaticResource Btn}" Margin="8,0,0,0"
+                            Command="{Binding OpenSettingsCommand}"/>
                     <Button Content="📂  Music folder" Style="{StaticResource Btn}" Margin="8,0,0,0"
                             Command="{Binding OpenFolderCommand}"/>
                 </StackPanel>
@@ -132,15 +175,59 @@
         <Border Grid.Row="0" VerticalAlignment="Bottom" Height="2" Background="Transparent">
             <ProgressBar x:Name="SearchSpinner" IsIndeterminate="True" Height="2"
                          Foreground="{DynamicResource AccentBrush}" Background="Transparent"
-                         BorderThickness="0" Visibility="Collapsed"/>
+                         BorderThickness="0" Visibility="{Binding IsSearching, Converter={StaticResource BoolToVisibility}}"/>
         </Border>
 
         <!-- ═══════════ results ═══════════ -->
         <Grid Grid.Row="1">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
+
+            <!-- PERF-07: per-provider status chips — pending/responded/timed
+                 out/offline, so a slow proxy reads as "working", not "hung". -->
+            <ItemsControl Grid.Row="1" ItemsSource="{Binding ProviderStatuses}"
+                          Margin="14,8,14,0"
+                          Visibility="{Binding ShowProviderStatuses, Converter={StaticResource BoolToVisibility}}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:ProviderStatusViewModel}">
+                        <Border Style="{StaticResource Chip}" Background="#262A38" Margin="0,0,6,4" Padding="7,3">
+                            <StackPanel Orientation="Horizontal">
+                                <Ellipse Width="7" Height="7" VerticalAlignment="Center" Margin="0,0,6,0">
+                                    <Ellipse.Style>
+                                        <Style TargetType="Ellipse">
+                                            <Setter Property="Fill" Value="{StaticResource FaintTextBrush}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding State}" Value="Pending">
+                                                    <Setter Property="Fill" Value="{StaticResource WarnBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding State}" Value="Responded">
+                                                    <Setter Property="Fill" Value="{DynamicResource AccentBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding State}" Value="TimedOut">
+                                                    <Setter Property="Fill" Value="{StaticResource DangerBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding State}" Value="Failed">
+                                                    <Setter Property="Fill" Value="{StaticResource DangerBrush}"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Ellipse.Style>
+                                </Ellipse>
+                                <TextBlock Text="{Binding Name}" FontSize="10.5"
+                                           Foreground="{StaticResource SubtleTextBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
 
             <!-- clipboard pill -->
             <Border Grid.Row="0" x:Name="ClipboardPill" Background="{StaticResource CardBrush}"
@@ -170,15 +257,12 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                     <TextBlock Style="{StaticResource H2}" Text="Results"/>
-                    <TextBlock x:Name="ResultsCount" Text="" Margin="8,0,0,0" FontSize="12.5"
+                    <TextBlock x:Name="ResultsCount" Text="{Binding ResultsCountLabel}" Margin="8,0,0,0" FontSize="12.5"
                                Foreground="{StaticResource FaintTextBrush}" VerticalAlignment="Center"/>
                 </StackPanel>
                 <ComboBox Grid.Column="1" Style="{StaticResource Combo}" Margin="16,0,0,0" Width="120"
-                          SelectedIndex="0" SelectionChanged="Sort_SelectionChanged" ToolTip="Sort results">
-                    <ComboBoxItem Content="Relevance"/>
-                    <ComboBoxItem Content="Duration"/>
-                    <ComboBoxItem Content="Title"/>
-                </ComboBox>
+                          ItemsSource="{Binding SortOptions}" SelectedItem="{Binding SelectedSort, Mode=TwoWay}"
+                          ToolTip="Sort results"/>
                 <StackPanel Grid.Column="3" Orientation="Horizontal">
                     <CheckBox Style="{StaticResource Switch}" Content="Hide in library" FontSize="12"
                               Foreground="{StaticResource SubtleTextBrush}"
@@ -188,7 +272,7 @@
                 </StackPanel>
             </Grid>
 
-            <ListBox Grid.Row="1" x:Name="ResultsList" ItemsSource="{Binding ResultsView}"
+            <ListBox Grid.Row="2" x:Name="ResultsList" ItemsSource="{Binding ResultsView}"
                      Background="Transparent" BorderThickness="0"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                      Padding="14,6,14,10"
@@ -196,6 +280,26 @@
                      VirtualizingPanel.VirtualizationMode="Recycling"
                      PreviewKeyDown="ResultsList_PreviewKeyDown"
                      MouseDoubleClick="ResultsList_MouseDoubleClick">
+                <!-- XAML-01: animate the list once per search (HasResults 0→1),
+                     not each row — per-item Loaded animations replay on recycled
+                     containers while scrolling. -->
+                <ListBox.Style>
+                    <Style TargetType="ListBox">
+                        <Setter Property="RenderTransformOrigin" Value="0,0"/>
+                        <Setter Property="RenderTransform">
+                            <Setter.Value>
+                                <TranslateTransform X="0" Y="0"/>
+                            </Setter.Value>
+                        </Setter>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding HasResults}" Value="True">
+                                <DataTrigger.EnterActions>
+                                    <BeginStoryboard Storyboard="{StaticResource CardIn}"/>
+                                </DataTrigger.EnterActions>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ListBox.Style>
                 <ListBox.ItemContainerStyle>
                     <Style TargetType="ListBoxItem">
                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -218,9 +322,6 @@
                                         <Trigger Property="IsSelected" Value="True">
                                             <Setter TargetName="Bd" Property="Background" Value="#232B36"/>
                                         </Trigger>
-                                        <EventTrigger RoutedEvent="Loaded">
-                                            <BeginStoryboard Storyboard="{StaticResource CardIn}"/>
-                                        </EventTrigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
                             </Setter.Value>
@@ -239,10 +340,10 @@
                                                  To="13" Duration="0:0:0.33"/>
                             </Storyboard>
                         </DataTemplate.Resources>
-                        <Border Background="{StaticResource CardBrush}" CornerRadius="12" Padding="12">
-                            <Border.Effect>
-                                <DropShadowEffect BlurRadius="10" ShadowDepth="1" Opacity="0.25" Color="#000000"/>
-                            </Border.Effect>
+                        <!-- XAML-02: no DropShadowEffect per row — a 1px border +
+                             background delta reads the same at zero render cost. -->
+                        <Border Background="{StaticResource CardBrush}" CornerRadius="12" Padding="12"
+                                BorderThickness="1" BorderBrush="{StaticResource BorderSoftBrush}">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
@@ -252,14 +353,9 @@
 
                                 <!-- artwork + overlays -->
                                 <Grid Grid.Column="0" Width="64" Height="64" Margin="0,0,14,0" VerticalAlignment="Center">
-                                    <Border Width="64" Height="64" CornerRadius="10">
-                                        <Border.OpacityMask>
-                                            <VisualBrush>
-                                                <VisualBrush.Visual>
-                                                    <Border Background="Black" CornerRadius="10" Width="64" Height="64"/>
-                                                </VisualBrush.Visual>
-                                            </VisualBrush>
-                                        </Border.OpacityMask>
+                                    <!-- XAML-02: rounded corners via ClipToBounds, no
+                                         VisualBrush OpacityMask (a per-row re-render). -->
+                                    <Border Width="64" Height="64" CornerRadius="10" ClipToBounds="True">
                                         <Grid>
                                             <TextBlock Text="♪" FontSize="26" Foreground="{StaticResource FaintTextBrush}"
                                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -302,6 +398,12 @@
                                                Foreground="{StaticResource SubtleTextBrush}"
                                                TextTrimming="CharacterEllipsis"/>
                                     <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                        <!-- album-mode chip: only when the search resolved to an album -->
+                                        <Border Style="{StaticResource Chip}" Background="#1D2B38"
+                                                Visibility="{Binding IsAlbumRow, Converter={StaticResource BoolToVisibility}}">
+                                            <TextBlock Text="{Binding AlbumBadge, StringFormat=Album · {0}}" FontSize="10.5"
+                                                       Foreground="#8FC7E8"/>
+                                        </Border>
                                         <Border Style="{StaticResource Chip}">
                                             <TextBlock Text="{Binding SourcesLabel}" FontSize="10.5" Foreground="#7BD99A"/>
                                         </Border>
@@ -344,7 +446,8 @@
             </ListBox>
 
             <!-- empty state -->
-            <StackPanel Grid.Row="1" x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <StackPanel Grid.Row="2" x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
+                        Visibility="{Binding ShowEmptyState, Converter={StaticResource BoolToVisibility}}">
                 <TextBlock Text="🎧" FontSize="54" HorizontalAlignment="Center" Margin="0,0,0,12"/>
                 <TextBlock Text="Search any song — Finglish, Persian, or a Spotify / YouTube link"
                            FontSize="15" Foreground="{StaticResource SubtleTextBrush}" HorizontalAlignment="Center"/>
@@ -377,7 +480,7 @@
                                 Padding="12,5" FontSize="12" Margin="8,0,0,0" Click="TabHistory_Click"/>
                         <Border Background="{DynamicResource AccentBrush}" CornerRadius="9" MinWidth="22" Height="18"
                                 Margin="8,0,0,0" VerticalAlignment="Center"
-                                Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVis}}">
+                                Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVisibility}}">
                             <TextBlock Text="{Binding ActiveDownloads}" FontSize="11" Foreground="#0B0E12"
                                        HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"/>
                         </Border>
@@ -389,22 +492,39 @@
                                    ToolTip="{Binding OutputDirectory}"/>
                         <Button Content="Clear finished" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                 Command="{Binding ClearFinishedCommand}" Margin="0,0,6,0"
-                                Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVis}}"/>
+                                Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVisibility}}"/>
                         <Button Content="Cancel all" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                 Click="CancelAll_Click" Margin="0,0,6,0"
-                                Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVis}}"/>
+                                Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVisibility}}"/>
                         <Button Content="Clear" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                 Command="{Binding ClearHistoryCommand}"
-                                Visibility="{Binding ShowHistory, Converter={StaticResource BoolToVis}}"/>
+                                Visibility="{Binding ShowHistory, Converter={StaticResource BoolToVisibility}}"/>
                     </StackPanel>
                 </Grid>
 
+                <!-- MVVM-10: downloads empty state -->
+                <TextBlock Grid.Row="1" Text="No downloads yet — search for a song and press Download"
+                           Style="{StaticResource Subtle}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="{Binding ShowDownloadsIdle, Converter={StaticResource BoolToVisibility}}"/>
+
+                <!-- FEAT-02: interrupted downloads from a previous session -->
+                <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Visibility="{Binding HasPendingResume, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="{Binding PendingResumeLabel}" Style="{StaticResource Subtle}"
+                               HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="420"/>
+                    <Button Content="Resume downloads" Style="{StaticResource BtnAccent}" Margin="0,12,0,0"
+                            HorizontalAlignment="Center" Padding="18,6"
+                            Command="{Binding ResumeQueueCommand}"/>
+                </StackPanel>
+
                 <!-- downloads list -->
-                <ListBox Grid.Row="1" ItemsSource="{Binding DownloadQueue}"
+                <ListBox Grid.Row="1" ItemsSource="{Binding DownloadQueue.DownloadQueue}"
                          Background="Transparent" BorderThickness="0"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         ScrollViewer.CanContentScroll="True"
                          VirtualizingPanel.IsVirtualizing="True"
-                         Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVis}}">
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         Visibility="{Binding ShowDownloads, Converter={StaticResource BoolToVisibility}}">
                     <ListBox.ItemTemplate>
                         <DataTemplate DataType="{x:Type vm:DownloadItemViewModel}">
                             <Grid Margin="0,0,0,7">
@@ -430,12 +550,14 @@
                                                    Foreground="{StaticResource FaintTextBrush}" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </StackPanel>
-                                <Grid Grid.Column="1" Margin="12,0" VerticalAlignment="Center">
-                                    <ProgressBar Style="{StaticResource SlimProgress}" Width="190"
-                                                 Value="{Binding Percent, Mode=OneWay}"
-                                                 IsIndeterminate="{Binding IsIndeterminate}"
-                                                 HorizontalAlignment="Left"/>
-                                </Grid>
+                                <!-- XAML-06: ProgressBar sits directly in the row grid —
+                                     the single-child wrapper Grid added a measure/arrange
+                                     pass per row on every progress update. -->
+                                <ProgressBar Grid.Column="1" Margin="12,0" VerticalAlignment="Center"
+                                             Style="{StaticResource SlimProgress}" Width="190"
+                                             Value="{Binding Percent, Mode=OneWay}"
+                                             IsIndeterminate="{Binding IsIndeterminate}"
+                                             HorizontalAlignment="Left"/>
                                 <TextBlock Grid.Column="2" Text="{Binding Status}" FontSize="11.5" MinWidth="170"
                                            Foreground="{Binding IsFailed, Converter={StaticResource BoolToRed}}"
                                            VerticalAlignment="Center" Margin="0,0,10,0"
@@ -443,22 +565,22 @@
                                 <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
                                                                     <Button Content="Open" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                                                             Click="OpenDownload_Click" Margin="0,0,4,0" ToolTip="Play the file"
-                                                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVis}}"/>
+                                                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVisibility}}"/>
                                                                     <Button Content="📁" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                                                             Click="OpenDownloadFolder_Click" Margin="0,0,4,0" ToolTip="Show in folder"
-                                                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVis}}"/>
+                                                                            Visibility="{Binding IsFinished, Converter={StaticResource BoolToVisibility}}"/>
                                                                     <Button Content="⏸" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                                                             Command="{Binding DataContext.PauseDownloadCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                                                             CommandParameter="{Binding}" Margin="0,0,4,0" ToolTip="Pause"
-                                                                            Visibility="{Binding IsActive, Converter={StaticResource BoolToVis}}"/>
+                                                                            Visibility="{Binding IsActive, Converter={StaticResource BoolToVisibility}}"/>
                                                                     <Button Content="▶" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                                                             Command="{Binding DataContext.ResumeDownloadCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                                                             CommandParameter="{Binding}" Margin="0,0,4,0" ToolTip="Resume"
-                                                                            Visibility="{Binding IsPaused, Converter={StaticResource BoolToVis}}"/>
+                                                                            Visibility="{Binding IsPaused, Converter={StaticResource BoolToVisibility}}"/>
                                                                     <Button Content="↻" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                                                             Command="{Binding DataContext.RestartDownloadCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                                                             CommandParameter="{Binding}" Margin="0,0,4,0" ToolTip="Restart download"
-                                                                            Visibility="{Binding IsFailed, Converter={StaticResource BoolToVis}}"/>
+                                                                            Visibility="{Binding IsFailed, Converter={StaticResource BoolToVisibility}}"/>
                                                                     <Button Content="✕" Style="{StaticResource BtnGhost}" FontSize="11.5"
                                                                             Click="CancelDownload_Click" ToolTip="Cancel / remove"/>
                                                                 </StackPanel>
@@ -467,11 +589,19 @@
                     </ListBox.ItemTemplate>
                 </ListBox>
 
+                <!-- MVVM-10: history empty state -->
+                <TextBlock Grid.Row="1" Text="Nothing downloaded yet"
+                           Style="{StaticResource Subtle}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="{Binding ShowHistoryEmpty, Converter={StaticResource BoolToVisibility}}"/>
+
                 <!-- history list -->
                 <ListBox Grid.Row="1" ItemsSource="{Binding History}"
                          Background="Transparent" BorderThickness="0"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                         Visibility="{Binding ShowHistory, Converter={StaticResource BoolToVis}}">
+                         ScrollViewer.CanContentScroll="True"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         Visibility="{Binding ShowHistory, Converter={StaticResource BoolToVisibility}}">
                     <ListBox.ItemTemplate>
                         <DataTemplate DataType="{x:Type vm:HistoryItemViewModel}">
                             <Grid Margin="0,0,0,6">
@@ -502,7 +632,7 @@
         <!-- ═══════════ now playing bar ═══════════ -->
         <Border Grid.Row="4" Background="{StaticResource CardDeepBrush}" Padding="16,9"
                 BorderBrush="{StaticResource BorderSoftBrush}" BorderThickness="0,1,0,0"
-                Visibility="{Binding IsPreviewPlaying, Converter={StaticResource BoolToVis}}">
+                Visibility="{Binding Playback.IsPreviewPlaying, Converter={StaticResource BoolToVisibility}}">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -515,28 +645,28 @@
                     <Grid>
                         <TextBlock Text="♪" FontSize="17" Foreground="{StaticResource FaintTextBrush}"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        <Image Source="{Binding PlayerArtwork}" Stretch="UniformToFill"/>
+                        <Image Source="{Binding Playback.PlayerArtwork}" Stretch="UniformToFill"/>
                     </Grid>
                 </Border>
 
                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,14,0">
-                    <TextBlock Text="{Binding PlayerTitle}" FontSize="12.5" FontWeight="SemiBold"
+                    <TextBlock Text="{Binding Playback.PlayerTitle}" FontSize="12.5" FontWeight="SemiBold"
                                Foreground="{StaticResource TextBrush}" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock Text="{Binding PlayerArtist}" FontSize="11"
+                    <TextBlock Text="{Binding Playback.PlayerArtist}" FontSize="11"
                                Foreground="{StaticResource SubtleTextBrush}" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" MinWidth="260">
                     <TextBlock Text="🔈" VerticalAlignment="Center" Margin="0,0,6,0"/>
                     <Slider Style="{StaticResource Slider}" Width="80" Minimum="0" Maximum="100"
-                            Value="{Binding Volume, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,14,0"
+                            Value="{Binding Playback.Volume, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,14,0"
                             ToolTip="Volume"/>
-                    <TextBlock x:Name="PlayerTimeText" Text="{Binding PlayerTime}" FontSize="11"
+                    <TextBlock x:Name="PlayerTimeText" Text="{Binding Playback.PlayerTime}" FontSize="11"
                                Foreground="{StaticResource SubtleTextBrush}" VerticalAlignment="Center"
                                Margin="0,0,10,0"/>
                     <Slider x:Name="SeekSlider" Style="{StaticResource Slider}" Width="240" Minimum="0"
-                            VerticalAlignment="Center" Thumb.DragStarted="Seek_DragStarted"
-                            Thumb.DragCompleted="Seek_DragCompleted"/>
+                            Maximum="{Binding Playback.PlayerDuration}" Value="{Binding Playback.PlayerPosition, Mode=OneWay}"
+                            VerticalAlignment="Center" Thumb.DragCompleted="Seek_DragCompleted"/>
                 </StackPanel>
 
                 <Button Grid.Column="3" Content="⏹" Style="{StaticResource Btn}" FontSize="13" Padding="10,5"
@@ -556,15 +686,18 @@
         </Border>
 
         <!-- ═══════════ toasts ═══════════ -->
+        <!-- XAML-04: the container spans the whole window at Z=100, so it must
+             never steal hit-testing; only the toast cards themselves are
+             clickable (they carry a non-null background). -->
         <ItemsControl Grid.Row="0" Grid.RowSpan="6" ItemsSource="{Binding Toasts}"
                       HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,70,18,0"
-                      IsHitTestVisible="True" Panel.ZIndex="100">
+                      IsHitTestVisible="False" Panel.ZIndex="100">
             <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:ToastViewModel}">
                     <Border Background="#EE1E2230" CornerRadius="11" Padding="14,10" Margin="0,0,0,10"
                             MinWidth="250" MaxWidth="360" Cursor="Hand" MouseLeftButtonUp="Toast_Click"
                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
-                            RenderTransformOrigin="0.5,0.5">
+                            IsHitTestVisible="True" RenderTransformOrigin="0.5,0.5">
                         <Border.RenderTransform>
                             <TranslateTransform X="0"/>
                         </Border.RenderTransform>

@@ -13,21 +13,18 @@ using Models;
 /// Note: iTunes is OR-of-terms, so fielded "artist" "title" queries are split
 /// client-side — the artist is searched, the title filters the response.
 /// </summary>
-public sealed class ITunesProvider : ISearchProvider, IPreviewProvider
+// MODERN-05: primary constructor — the ctor only assigns parameters to fields.
+public sealed partial class ITunesProvider(SharedHttpClient http, ILogger<ITunesProvider>? logger = null)
+    : ISearchProvider, IPreviewProvider, IAlbumProvider
 {
-    private readonly HttpClient _http;
-    private readonly ILogger<ITunesProvider> _logger;
+    private readonly HttpClient _http = http.Create("ITunes");
+    private readonly ILogger<ITunesProvider> _logger =
+        logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ITunesProvider>.Instance;
 
     public ProviderId Id => ProviderId.ITunes;
     public string DisplayName => "iTunes";
     public SearchTier Tier => SearchTier.Catalog;
     public bool IsAvailable => true;
-
-    public ITunesProvider(SharedHttpClient http, ILogger<ITunesProvider>? logger = null)
-    {
-        _http = http.Create("ITunes");
-        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ITunesProvider>.Instance;
-    }
 
     public async IAsyncEnumerable<SearchResult> SearchAsync(
         string query, int maxResults = 25,
@@ -63,6 +60,8 @@ public sealed class ITunesProvider : ISearchProvider, IPreviewProvider
                     Title = t.TrackName ?? "",
                     Artist = t.ArtistName ?? "",
                     Album = t.CollectionName,
+                    AlbumId = t.CollectionId is > 0 ? t.CollectionId.ToString() : null,
+                    TrackNumber = t.TrackNumber is > 0 ? t.TrackNumber : null,
                     Duration = t.TrackTimeMillis is > 0 ? TimeSpan.FromMilliseconds(t.TrackTimeMillis.Value) : null,
                     ArtworkUri = TryUri(artwork),
                     ReleaseDate = DateTimeOffset.TryParse(t.ReleaseDate, out var rd) ? rd : null,
@@ -98,15 +97,71 @@ public sealed class ITunesProvider : ISearchProvider, IPreviewProvider
 
     public Uri? GetPreviewStreamUri(SearchResult track) => track.DirectStreamUri;
 
+    /// <summary>Album search: lookup the collection, return every song on it (album mode).</summary>
+    public async Task<IReadOnlyList<SearchResult>> GetAlbumTracksAsync(AlbumRef album, CancellationToken ct = default)
+    {
+        var url = $"https://itunes.apple.com/lookup?id={Uri.EscapeDataString(album.Id)}&entity=song&limit=200";
+        try
+        {
+            using var resp = await _http.GetAsync(url, ct).ConfigureAwait(false);
+            resp.EnsureSuccessStatusCode();
+            await using var s = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            var dto = await JsonSerializer.DeserializeAsync<ITunesSearchResponse>(s,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, ct).ConfigureAwait(false);
+            if (dto?.Results is null) return Array.Empty<SearchResult>();
+            var rows = new List<SearchResult>();
+            foreach (var t in dto.Results)
+            {
+                if (t.TrackId <= 0) continue; // the collection row itself
+                var artwork = t.ArtworkUrl100?.Replace("100x100bb", "600x600bb");
+                rows.Add(new SearchResult
+                {
+                    Provider = ProviderId.ITunes,
+                    Id = t.TrackId.ToString(),
+                    Metadata = new TrackMetadata
+                    {
+                        Title = t.TrackName ?? "",
+                        Artist = t.ArtistName ?? album.Artist,
+                        Album = t.CollectionName ?? album.Name,
+                        AlbumId = album.Id,
+                        TrackNumber = t.TrackNumber is > 0 ? t.TrackNumber : null,
+                        Duration = t.TrackTimeMillis is > 0 ? TimeSpan.FromMilliseconds(t.TrackTimeMillis.Value) : null,
+                        ArtworkUri = TryUri(artwork),
+                        ReleaseDate = DateTimeOffset.TryParse(t.ReleaseDate, out var rd) ? rd : null,
+                        Genre = t.PrimaryGenreName,
+                    },
+                    DirectStreamUri = TryUri(t.PreviewUrl),
+                    MaxQuality = StreamQuality.Preview64K,
+                    SourceUrl = $"https://music.apple.com/us/album/{t.TrackId}",
+                    Downloadable = false,
+                    PreviewOnly = true,
+                });
+            }
+            return rows;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("iTunes album lookup failed for {Album}: {Msg}", album.Name, ex.Message);
+            return Array.Empty<SearchResult>();
+        }
+    }
+
     /// <summary>Splits fielded "artist" "title" (or artist:"X" track:"Y") queries; raw query otherwise.</summary>
     internal static (string SearchTerm, string? TitleFilter) SplitArtistTitle(string query)
     {
-        var fielded = System.Text.RegularExpressions.Regex.Match(query, "artist:\"([^\"]+)\"\\s+track:\"([^\"]+)\"");
+        var fielded = FieldedQueryRegex().Match(query);
         if (fielded.Success) return (fielded.Groups[1].Value.Trim(), fielded.Groups[2].Value.Trim());
-        var quoted = System.Text.RegularExpressions.Regex.Match(query, "\"([^\"]+)\"\\s+\"([^\"]+)\"");
+        var quoted = QuotedPairRegex().Match(query);
         if (quoted.Success) return (quoted.Groups[1].Value.Trim(), quoted.Groups[2].Value.Trim());
         return (query, null);
     }
+
+    // BUG-15: source-generated instead of the static Regex.Match(string, pattern) path.
+    [System.Text.RegularExpressions.GeneratedRegex("artist:\"([^\"]+)\"\\s+track:\"([^\"]+)\"\"")]
+    private static partial System.Text.RegularExpressions.Regex FieldedQueryRegex();
+
+    [System.Text.RegularExpressions.GeneratedRegex("\"([^\"]+)\"\\s+\"([^\"]+)\"\"")]
+    private static partial System.Text.RegularExpressions.Regex QuotedPairRegex();
 
     internal static bool TitleMatches(string title, string filter)
     {
@@ -128,7 +183,9 @@ public sealed class ITunesProvider : ISearchProvider, IPreviewProvider
         [JsonPropertyName("trackId")] public long TrackId { get; set; }
         [JsonPropertyName("trackName")] public string? TrackName { get; set; }
         [JsonPropertyName("artistName")] public string? ArtistName { get; set; }
+        [JsonPropertyName("collectionId")] public long? CollectionId { get; set; }
         [JsonPropertyName("collectionName")] public string? CollectionName { get; set; }
+        [JsonPropertyName("trackNumber")] public int? TrackNumber { get; set; }
         [JsonPropertyName("previewUrl")] public string? PreviewUrl { get; set; }
         [JsonPropertyName("artworkUrl100")] public string? ArtworkUrl100 { get; set; }
         [JsonPropertyName("trackTimeMillis")] public long? TrackTimeMillis { get; set; }

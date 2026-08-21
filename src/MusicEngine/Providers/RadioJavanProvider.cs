@@ -13,7 +13,7 @@ using Models;
 /// (rj-deskcloud.com/api2): search returns real tracks with direct 128/256 kbps
 /// MP3/AAC URLs. Display tier; downloads re-resolve a fresh CDN URL first.
 /// </summary>
-public sealed class RadioJavanProvider : ISearchProvider, IDownloadProvider
+public sealed class RadioJavanProvider : ISearchProvider, IDownloadProvider, IAlbumProvider
 {
     private readonly HttpClient _http;
     private readonly HttpClient _mediaHttp;
@@ -24,12 +24,12 @@ public sealed class RadioJavanProvider : ISearchProvider, IDownloadProvider
     public SearchTier Tier => SearchTier.Display;
     public bool IsAvailable => true;
 
-    public RadioJavanProvider(SharedHttpClient http, ILogger<RadioJavanProvider>? logger = null, string? proxyUrl = null)
+    public RadioJavanProvider(SharedHttpClient http, ILogger<RadioJavanProvider>? logger = null)
     {
         _http = http.Create("RadioJavan");
         // The media CDN (host*.media-rj.com) is blocked on some filtered networks —
         // search API stays direct, media downloads can go through the proxy.
-        _mediaHttp = http.Create("RadioJavanMedia", proxied: !string.IsNullOrEmpty(proxyUrl));
+        _mediaHttp = http.Create("RadioJavanMedia", proxied: !string.IsNullOrEmpty(http.ProxyUrl));
         if (!_http.DefaultRequestHeaders.Contains("User-Agent"))
             _http.DefaultRequestHeaders.Add("User-Agent", "RadioJavan/5.2.0 Chrome/130 Electron/33 Safari/537.36");
         if (!_http.DefaultRequestHeaders.Contains("x-rj-user-agent"))
@@ -59,9 +59,18 @@ public sealed class RadioJavanProvider : ISearchProvider, IDownloadProvider
             yield break;
         }
 
-        if (dto?.Mp3s is null) yield break;
+        // mp3s = loose singles; albums = album-track rows (carry album_id). Both
+        // are real downloadable tracks, so merge them (album rows feed album-mode
+        // detection). Dedupe by track id — a track can appear in both arrays.
+        var rows = new List<RjMp3>();
+        var seenIds = new HashSet<int>();
+        foreach (var s in dto?.Mp3s ?? new List<RjMp3>())
+            if (seenIds.Add(s.Id)) rows.Add(s);
+        foreach (var s in dto?.Albums ?? new List<RjMp3>())
+            if (seenIds.Add(s.Id)) rows.Add(s);
+
         var emitted = 0;
-        foreach (var s in dto.Mp3s)
+        foreach (var s in rows)
         {
             if (emitted >= maxResults) yield break;
             ct.ThrowIfCancellationRequested();
@@ -114,6 +123,9 @@ public sealed class RadioJavanProvider : ISearchProvider, IDownloadProvider
         {
             Title = s.Song ?? s.Name ?? string.Empty,
             Artist = s.Artist ?? string.Empty,
+            Album = s.AlbumName ?? s.Album?.Album,
+            AlbumId = (s.AlbumId ?? s.Album?.Id) is > 0 ? (s.AlbumId ?? s.Album!.Id).ToString() : null,
+            TrackNumber = s.Album?.Track is > 0 ? s.Album.Track : null,
             Duration = s.Duration is > 0 ? TimeSpan.FromSeconds(s.Duration.Value) : null,
             ArtworkUri = TryUri(s.Photo),
         },
@@ -123,12 +135,53 @@ public sealed class RadioJavanProvider : ISearchProvider, IDownloadProvider
         Downloadable = true,
     };
 
+    /// <summary>
+    /// Album search (album mode): Radio Javan has no public album-track endpoint,
+    /// so the album is expanded by searching the album title AND the artist name
+    /// (each returns the album's most played tracks) and keeping every row that
+    /// carries the album's id. Best effort — popular tracks surface, the long
+    /// tail may not.
+    /// </summary>
+    public async Task<IReadOnlyList<SearchResult>> GetAlbumTracksAsync(AlbumRef album, CancellationToken ct = default)
+    {
+        var results = new List<SearchResult>();
+        var seenIds = new HashSet<string>(StringComparer.Ordinal);
+        var queries = new List<string> { album.Name };
+        if (!string.IsNullOrWhiteSpace(album.Artist) && album.Artist != album.Name)
+            queries.Add(album.Artist);
+        foreach (var q in queries.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (ct.IsCancellationRequested) break;
+            try
+            {
+                await foreach (var row in SearchAsync(q, 25, ct).ConfigureAwait(false))
+                {
+                    if (row.Metadata.AlbumId != album.Id) continue;
+                    if (seenIds.Add(row.Id))
+                        results.Add(row);
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogDebug("Radio Javan album expansion for {Album} via {Query} failed: {Msg}",
+                    album.Name, q, ex.Message);
+            }
+        }
+        return results
+            .OrderBy(r => r.Metadata.TrackNumber ?? int.MaxValue)
+            .ThenBy(r => r.Metadata.Title, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static Uri? TryUri(string? raw) =>
         !string.IsNullOrWhiteSpace(raw) && Uri.TryCreate(raw, UriKind.Absolute, out var u) ? u : null;
 
     private sealed class RjSearchResponse
     {
         [JsonPropertyName("mp3s")] public List<RjMp3>? Mp3s { get; set; }
+        // Album-track rows: same shape as mp3s but tagged with album_id/album_album.
+        [JsonPropertyName("albums")] public List<RjMp3>? Albums { get; set; }
     }
 
     private sealed class RjMp3
@@ -141,5 +194,18 @@ public sealed class RadioJavanProvider : ISearchProvider, IDownloadProvider
         [JsonPropertyName("hq_link")] public string? HqLink { get; set; }
         [JsonPropertyName("duration")] public double? Duration { get; set; }
         [JsonPropertyName("photo")] public string? Photo { get; set; }
+        // Album identity: nested (album) and flat (album_*) — the API provides
+        // both depending on the endpoint/shape. album_id groups the album's tracks.
+        [JsonPropertyName("album_id")] public int? AlbumId { get; set; }
+        [JsonPropertyName("album_album")] public string? AlbumName { get; set; }
+        [JsonPropertyName("album")] public RjAlbum? Album { get; set; }
+    }
+
+    private sealed class RjAlbum
+    {
+        [JsonPropertyName("id")] public int Id { get; set; }
+        [JsonPropertyName("album")] public string? Album { get; set; }
+        [JsonPropertyName("artist")] public string? Artist { get; set; }
+        [JsonPropertyName("track")] public int? Track { get; set; }
     }
 }

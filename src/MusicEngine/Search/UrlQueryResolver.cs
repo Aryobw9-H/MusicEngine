@@ -10,7 +10,13 @@ using Http;
 /// </summary>
 public static class UrlQueryResolver
 {
-    public static async Task<string?> ResolveAsync(Uri uri, CancellationToken ct = default)
+    /// <summary>
+    /// Resolves a pasted track URL to a text query. When <paramref name="http"/>
+    /// is supplied (the app-wide shared client), it is reused so connection pools
+    /// and Reachability routes are shared (BUG-14); otherwise a throwaway client
+    /// is created for standalone/test-harness use.
+    /// </summary>
+    public static async Task<string?> ResolveAsync(Uri uri, CancellationToken ct = default, SharedHttpClient? http = null)
     {
         var host = uri.Host.StartsWith("www.") ? uri.Host[4..] : uri.Host;
         var oembed = host switch
@@ -27,8 +33,12 @@ public static class UrlQueryResolver
 
         try
         {
-            using var http = new SharedHttpClient().Create("oEmbed");
-            using var resp = await http.GetAsync(oembed, ct).ConfigureAwait(false);
+            // oEmbed hosts (YouTube/Spotify/SoundCloud) are proxy-tier on filtered
+            // networks — route them like the other proxied clients.
+            var shared = http?.Create("UrlResolve", proxied: true);
+            using var owned = shared is null ? new SharedHttpClient().Create("oEmbed") : null;
+            var client = shared ?? owned!;
+            using var resp = await client.GetAsync(oembed, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode) return null;
             using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
             var title = doc.RootElement.TryGetProperty("title", out var t) ? t.GetString() : null;
@@ -38,7 +48,7 @@ public static class UrlQueryResolver
             // lives in the page's og:title ("Artist - Track") — cheap fetch, no auth.
             if (host.Contains("spotify") && author is null or "Spotify")
             {
-                var og = await TrySpotifyOgTitleAsync(http, uri, ct).ConfigureAwait(false);
+                var og = await TrySpotifyOgTitleAsync(client, uri, ct).ConfigureAwait(false);
                 if (og is { Length: > 2 }) return og;
             }
 

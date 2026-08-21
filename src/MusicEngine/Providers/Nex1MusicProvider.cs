@@ -10,12 +10,13 @@ using Microsoft.Extensions.Logging;
 using Models;
 
 /// <summary>
-/// Nex1Music (largest Iranian music index) — download tier. Search parses the
-/// mobile site's "more" links, track pages expose 320/128 proxy URLs whose real
-/// filename rides in the <c>filename=</c> query param. Frequently behind
-/// Cloudflare; when it yields nothing, other sources take over.
+/// Nex1Music (largest Iranian music index) — download tier, fully domestic.
+/// Search parses the site's "آهنگ-…" post links; each track page embeds the
+/// direct mp3 in a <c>data-music</c> attribute on <c>div.item</c> (with
+/// <c>data-artist</c>/<c>data-track</c>) — the old <c>div.lnkdl</c> buttons were
+/// removed in a 2025 redesign. The site currently serves 128 kbps only.
 /// </summary>
-public sealed class Nex1MusicProvider : ISearchProvider, IDownloadProvider
+public sealed partial class Nex1MusicProvider : ISearchProvider, IDownloadProvider
 {
     private const string HostMobile = "https://nex1music.com";
     private const string UserAgent =
@@ -31,7 +32,8 @@ public sealed class Nex1MusicProvider : ISearchProvider, IDownloadProvider
 
     public Nex1MusicProvider(SharedHttpClient http, ILogger<Nex1MusicProvider>? logger = null)
     {
-        _http = http.Create("Nex1Music");
+        // insecureTls: CDN pages may serve self-signed certs (BUG-13 family).
+        _http = http.Create("Nex1Music", insecureTls: true);
         // Full browser fingerprint — the site serves bots a stub page.
         SharedHttpClient.ApplyBrowserHeaders(_http, "https://nex1music.com/");
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Nex1MusicProvider>.Instance;
@@ -81,16 +83,19 @@ public sealed class Nex1MusicProvider : ISearchProvider, IDownloadProvider
                 : lastSegment;
             maybeTitle = maybeTitle.Replace('-', ' ').Trim();
             if (maybeTitle.Length < 3) continue;
-            var links = await GetQualityLinksAsync(uri.AbsoluteUri, ct).ConfigureAwait(false);
-            if (links is not { Count: > 0 }) continue;
+            var track = await GetTrackAsync(uri.AbsoluteUri, maybeTitle, ct).ConfigureAwait(false);
+            if (track is null) continue;
 
             yield return new SearchResult
             {
                 Provider = ProviderId.Nex1Music,
                 Id = uri.AbsolutePath,
-                Metadata = new TrackMetadata { Title = maybeTitle, Artist = "" },
-                DirectStreamUri = new Uri(links[0].Url), // first = 320 when present
-                MaxQuality = StreamQuality.Maximum256K,
+                Metadata = new TrackMetadata { Title = track.Title, Artist = track.Artist,
+                    Duration = track.Duration, ArtworkUri = TryUri(track.ArtworkUrl) },
+                DirectStreamUri = new Uri(track.Url),
+                MaxQuality = track.Variant == QualityVariant.Q320 ? StreamQuality.Maximum256K
+                    : track.Variant == QualityVariant.Q192 ? StreamQuality.High192K
+                    : StreamQuality.Standard128K,
                 SourceUrl = uri.AbsoluteUri,
                 Downloadable = true,
             };
@@ -103,14 +108,21 @@ public sealed class Nex1MusicProvider : ISearchProvider, IDownloadProvider
         IProgress<DownloadProgress>? progress = null, CancellationToken ct = default)
     {
         progress?.Report(new DownloadProgress(DownloadPhase.Resolving, 0, null, "Nex1Music: resolving URL"));
-        var finalUrl = track.DirectStreamUri?.OriginalString;
-        if (string.IsNullOrEmpty(finalUrl) || !finalUrl!.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
+        // Always re-resolve: the CDN URL from search may be expired or stale.
+        // Fall back to the stored URL only if re-resolution fails.
+        string? finalUrl = null;
+        try
         {
-            var links = await GetQualityLinksAsync(track.SourceUrl, ct).ConfigureAwait(false) ?? new List<QualityLink>();
-            finalUrl = links.FirstOrDefault(q => q.Variant == QualityVariant.Q320)?.Url
-                       ?? links.FirstOrDefault()?.Url
-                       ?? throw new InvalidOperationException("No download URL on Nex1Music page.");
+            var found = await GetTrackAsync(track.SourceUrl, track.Metadata.Title, ct).ConfigureAwait(false);
+            finalUrl = found?.Url;
         }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("Nex1Music re-resolve failed ({Msg}); falling back to stored URL", ex.Message);
+        }
+        finalUrl ??= track.DirectStreamUri?.OriginalString;
+        if (string.IsNullOrEmpty(finalUrl))
+            throw new InvalidOperationException("No download URL on Nex1Music page.");
 
         var name = ExtractFilename(finalUrl);
         var finalPath = Path.Combine(options.OutputDirectory,
@@ -133,36 +145,129 @@ public sealed class Nex1MusicProvider : ISearchProvider, IDownloadProvider
         }
     }
 
-    private async Task<List<QualityLink>?> GetQualityLinksAsync(string trackPageUrl, CancellationToken ct)
+    /// <summary>Fetch the track page and pick its direct mp3. The 2025 redesign
+    /// embeds every track on the page in <c>div.item[data-music]</c> — prefer the
+    /// item whose artist+title matches the slug (the page also carries a generic
+    /// "latest songs" widget), fall back to the first item.</summary>
+    private async Task<TrackLink?> GetTrackAsync(string trackPageUrl, string slugText, CancellationToken ct)
     {
         var html = await GetStringAsync(trackPageUrl, ct).ConfigureAwait(false);
         if (string.IsNullOrEmpty(html)) return null;
 
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
-        var links = doc.DocumentNode
-            .SelectNodes("//div[contains(@class,'lnkdl')]//a[@href]")?
-            .Select(a => (Href: a.GetAttributeValue("href", ""), Text: a.InnerText.Trim()))
-            .Where(x => !string.IsNullOrEmpty(x.Href))
-            .Select(x => new QualityLink(x.Href, x.Text switch
-            {
-                string s when s.Contains("320") => QualityVariant.Q320,
-                string s when s.Contains("192") => QualityVariant.Q192,
-                string s when s.Contains("128") => QualityVariant.Q128,
-                _ => QualityVariant.Unknown,
-            }))
+        var items = doc.DocumentNode
+            .SelectNodes("//div[contains(@class,'item')][@data-music]")
+            ?.Select(n => new TrackLink(
+                Url: (n.GetAttributeValue("data-music", "") ?? "").Replace(" ", "%20"),
+                Artist: n.GetAttributeValue("data-artist", "") ?? "",
+                Title: n.GetAttributeValue("data-track", "") ?? "",
+                Variant: QualityFromUrl(n.GetAttributeValue("data-music", "") ?? ""),
+                Duration: null,
+                ArtworkUrl: null))
+            .Where(t => t.Url.Length > 0)
             .ToList();
-        return links is null ? null : links.OrderByDescending(l => (int)l.Variant).ToList();
+        if (items is null || items.Count == 0) return null;
+
+        var best = items.FirstOrDefault(t =>
+            Text.TrackTextNormalizer.KeysOverlap(t.Artist + " " + t.Title, slugText)
+            || Text.TrackTextNormalizer.ContainsAllTokens(t.Artist + " " + t.Title, slugText));
+        best ??= items.First();
+        var duration = ExtractDurationFromPage(html);
+        var artwork = ExtractArtworkFromPage(doc);
+        return new TrackLink(
+            best.Url,
+            best.Artist.Length > 0 ? best.Artist : "",
+            best.Title.Length > 0 ? best.Title : slugText,
+            best.Variant,
+            duration,
+            artwork);
+    }
+
+    private static QualityVariant QualityFromUrl(string url)
+    {
+        if (url.Contains("320")) return QualityVariant.Q320;
+        if (url.Contains("192")) return QualityVariant.Q192;
+        if (url.Contains("128")) return QualityVariant.Q128;
+        return QualityVariant.Unknown;
+    }
+
+    private static TimeSpan? ExtractDurationFromPage(string html)
+    {
+        var metaMatch = DurationMetaRegex().Match(html);
+        if (metaMatch.Success && int.TryParse(metaMatch.Groups[1].Value, out var secs))
+            return TimeSpan.FromSeconds(secs);
+        var persianMatch = PersianDurationRegex().Match(html);
+        if (persianMatch.Success
+            && int.TryParse(persianMatch.Groups[1].Value, out var pMin)
+            && int.TryParse(persianMatch.Groups[2].Value, out var pSec))
+            return TimeSpan.FromMinutes(pMin) + TimeSpan.FromSeconds(pSec);
+        var textMatch = DurationTextRegex().Match(html);
+        if (textMatch.Success
+            && int.TryParse(textMatch.Groups[1].Value, out var min)
+            && int.TryParse(textMatch.Groups[2].Value, out var sec)
+            && min is >= 0 and <= 59 && sec is >= 0 and <= 59
+            && !IsInTimestampContext(html, textMatch.Index))
+            return TimeSpan.FromMinutes(min) + TimeSpan.FromSeconds(sec);
+        return null;
+    }
+
+    private static bool IsInTimestampContext(string html, int index)
+    {
+        if (index > 0)
+        {
+            var prev = html[index - 1];
+            if (prev is 'T' or '-' or '+' or ':' || char.IsDigit(prev)) return true;
+        }
+        var start = Math.Max(0, index - 20);
+        var context = html[start..(index + 8)];
+        if (T_iso_pattern().IsMatch(context)) return true;
+        return false;
+    }
+
+    private static Uri? TryUri(string? s) =>
+        !string.IsNullOrWhiteSpace(s) && Uri.TryCreate(s, UriKind.Absolute, out var u) ? u : null;
+
+    private static string? ExtractArtworkFromPage(HtmlDocument doc)
+    {
+        // og:image is the most reliable across all Persian music sites
+        var ogImage = doc.DocumentNode.SelectSingleNode("//meta[@property='og:image']");
+        var content = ogImage?.GetAttributeValue("content", "");
+        if (!string.IsNullOrWhiteSpace(content) && content.StartsWith("http"))
+            return content;
+        // Fallback: first large cover image
+        var img = doc.DocumentNode.SelectSingleNode("//img[contains(@class,'cover') or contains(@class,'artwork') or contains(@class,'thumb')]");
+        var src = img?.GetAttributeValue("src", "");
+        if (!string.IsNullOrWhiteSpace(src) && src.StartsWith("http"))
+            return src;
+        return null;
     }
 
     private static string? ExtractFilename(string url)
     {
         if (!url.Contains("filename=")) return null;
-        var match = Regex.Match(url, @"filename=([^&]+)");
+        var match = FilenameRegex().Match(url);
         return match.Success ? HttpUtility.UrlDecode(match.Groups[1].Value) : null;
     }
 
+    // BUG-15: source-generated instead of the static Regex.Match(string, pattern) path.
+    [System.Text.RegularExpressions.GeneratedRegex(@"filename=([^&]+)")]
+    private static partial System.Text.RegularExpressions.Regex FilenameRegex();
+
+    [GeneratedRegex("music:duration\"\\s+content=\"(\\d+)\"")]
+    private static partial Regex DurationMetaRegex();
+
+    [GeneratedRegex("(\\d{1,2}):(\\d{2})")]
+    private static partial Regex DurationTextRegex();
+
+    [GeneratedRegex("زمان\\s*:\\s*(\\d{1,2}):(\\d{2})")]
+    private static partial Regex PersianDurationRegex();
+
+    [GeneratedRegex("T\\d{2}:\\d{2}")]
+    private static partial Regex T_iso_pattern();
+
     private enum QualityVariant { Unknown = 0, Q128 = 1, Q192 = 2, Q320 = 3 }
 
-    private sealed record QualityLink(string Url, QualityVariant Variant);
+    private sealed record TrackLink(string Url, string Artist, string Title, QualityVariant Variant,
+        TimeSpan? Duration, string? ArtworkUrl);
 }

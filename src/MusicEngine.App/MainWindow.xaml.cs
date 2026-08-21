@@ -11,7 +11,6 @@ using ViewModels;
 public partial class MainWindow : Window
 {
     private readonly MainViewModel _vm;
-    private bool _seeking;
 
     public MainWindow(MainViewModel vm)
     {
@@ -20,68 +19,15 @@ public partial class MainWindow : Window
         DataContext = vm;
 
         vm.SettingsRequested += ShowSettings;
-        vm.PropertyChanged += VmOnPropertyChanged;
-        UpdateEmptyState();
+        vm.BatchRequested += ShowBatch;
     }
-
-    private void VmOnPropertyChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        switch (e.PropertyName)
-        {
-            case nameof(MainViewModel.HasResults):
-            case nameof(MainViewModel.IsSearching):
-                UpdateEmptyState();
-                ResultsCount.Text = _vm.ResultsView.Count > 0 ? $"({_vm.ResultsView.Count})" : "";
-                break;
-            case nameof(MainViewModel.PlayerPosition) when !_seeking:
-                SeekSlider.Value = _vm.PlayerPosition;
-                break;
-            case nameof(MainViewModel.PlayerDuration):
-                SeekSlider.Maximum = Math.Max(1, _vm.PlayerDuration);
-                break;
-        }
-    }
-
-    private void UpdateEmptyState() =>
-        EmptyState.Visibility = _vm.HasResults || _vm.IsSearching
-            ? Visibility.Collapsed
-            : Visibility.Visible;
 
     // ---------------- search ----------------
-
-    private async void Search_Click(object sender, RoutedEventArgs e) => await RunSearch();
-
-    private async void SearchBox_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Enter) return;
-        e.Handled = true;
-        await RunSearch();
-    }
-
-    private async Task RunSearch()
-    {
-        RecentsPopup.IsOpen = false;
-        SearchSpinner.Visibility = Visibility.Visible;
-        try { await _vm.SearchAsync(); }
-        finally { SearchSpinner.Visibility = Visibility.Collapsed; }
-    }
 
     private void ClearQuery_Click(object sender, RoutedEventArgs e)
     {
         _vm.Query = "";
         SearchBox.Focus();
-    }
-
-    private void Recents_Click(object sender, RoutedEventArgs e) =>
-        RecentsPopup.IsOpen = _vm.RecentSearches.Count > 0 && !RecentsPopup.IsOpen;
-
-    private async void Recent_Click(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is string q)
-        {
-            _vm.Query = q;
-            await RunSearch();
-        }
     }
 
     // ---------------- results ----------------
@@ -118,19 +64,6 @@ public partial class MainWindow : Window
     {
         if (ResultsList.SelectedItem is TrackItemViewModel track)
             _vm.Download(track);
-    }
-
-    private void Sort_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if ((sender as ComboBox)?.SelectedItem is ComboBoxItem item && _vm is not null)
-        {
-            _vm.SortMode = item.Content switch
-            {
-                "Duration" => ResultSort.Duration,
-                "Title" => ResultSort.Title,
-                _ => ResultSort.Relevance,
-            };
-        }
     }
 
     // ---------------- downloads / history ----------------
@@ -175,11 +108,8 @@ public partial class MainWindow : Window
 
     // ---------------- player ----------------
 
-    private void Seek_DragStarted(object sender, DragStartedEventArgs e) => _seeking = true;
-
     private void Seek_DragCompleted(object sender, DragCompletedEventArgs e)
     {
-        _seeking = false;
         _vm.SeekPreview(SeekSlider.Value);
     }
 
@@ -198,8 +128,9 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
-        var config = AppConfig.Load();
-        if (config.MinimizeToTray && _vm.ActiveDownloads > 0)
+        // Read the tray policy from the injected config singleton (BUG-10) — a
+        // fresh AppConfig.Load() here would see stale on-disk values.
+        if (_vm.MinimizeToTray && _vm.ActiveDownloads > 0)
         {
             e.Cancel = true;
             Hide();
@@ -208,32 +139,43 @@ public partial class MainWindow : Window
         _vm.Dispose();
     }
 
+    // ---------------- batch queue (FEAT-06) ----------------
+
+    private void ShowBatch(BatchViewModel vm)
+    {
+        var dialog = new BatchWindow(vm) { Owner = this };
+        dialog.ShowDialog();
+    }
+
     // ---------------- settings ----------------
 
     private void ShowSettings()
     {
-        var dialog = new SettingsWindow { Owner = this };
+        var vm = new SettingsViewModel(_vm.Config, _vm.BuildDiagnosticsReport);
+        var dialog = new SettingsWindow(vm) { Owner = this };
         if (dialog.ShowDialog() != true) return;
 
-        _vm.SaveSettings(cfg =>
-        {
-            cfg.OutputDirectory = dialog.OutputDirectory;
-            cfg.ProxyUrl = dialog.ProxyUrl;
-            cfg.CookiesBrowser = dialog.CookiesBrowser;
-            cfg.EnablePersianIndex = dialog.EnablePersianIndex;
-            cfg.MaxParallelDownloads = dialog.ParallelDownloads;
-            cfg.BitrateKbps = dialog.Bitrate;
-            cfg.FilenameTemplate = dialog.Template;
-            cfg.Accent = dialog.Accent;
-            cfg.ClipboardMonitor = dialog.ClipboardMonitor;
-            cfg.MinimizeToTray = dialog.MinimizeToTray;
-            cfg.DownloadToasts = dialog.DownloadToasts;
-            foreach (var disabled in dialog.DisabledSources)
-                cfg.DisabledSources.Add(disabled);
-            foreach (var enabled in dialog.EnabledSources)
-                cfg.DisabledSources.Remove(enabled);
-        });
-        AccentTheme.Apply(dialog.Accent);
-        _vm.SetClipboardMonitor(dialog.ClipboardMonitor);
+        // FEAT-05: proxy + cookies are captured at construction (SharedHttpClient
+        // and YtDlpProvider singletons), so changes need a restart to take effect.
+        // Everything else in the dialog applies instantly.
+        var proxyChanged = !string.Equals(vm.ProxyUrl?.Trim(), _vm.Config.ProxyUrl?.Trim(), StringComparison.Ordinal);
+        var cookiesChanged =
+            !string.Equals(vm.CookiesBrowser?.Trim(), _vm.Config.CookiesBrowser?.Trim(), StringComparison.Ordinal)
+            || !string.Equals(vm.CookiesFile?.Trim(), _vm.Config.CookiesFile?.Trim(), StringComparison.Ordinal);
+
+        _vm.SaveSettings(vm.ApplyTo);
+        AccentTheme.Apply(vm.Accent);
+        _vm.SetClipboardMonitor(vm.ClipboardMonitor);
+
+        if (!proxyChanged && !cookiesChanged) return;
+        var what = proxyChanged && cookiesChanged ? "Proxy and cookie"
+            : proxyChanged ? "Proxy" : "Cookie";
+        if (MessageBox.Show(this,
+                $"{what} changes take effect after a restart.\n\nRestart MusicEngine now?",
+                "Restart required", MessageBoxButton.YesNo, MessageBoxImage.Question)
+            != MessageBoxResult.Yes) return;
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            Environment.ProcessPath!) { UseShellExecute = true });
+        Application.Current.Shutdown();
     }
 }

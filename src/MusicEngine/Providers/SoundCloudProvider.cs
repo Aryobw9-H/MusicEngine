@@ -42,9 +42,9 @@ public sealed class SoundCloudProvider : ISearchProvider, IDownloadProvider
     public SearchTier Tier => SearchTier.Display;
     public bool IsAvailable => true;
 
-    public SoundCloudProvider(SharedHttpClient http, ILogger<SoundCloudProvider>? logger = null, string? proxyUrl = null)
+    public SoundCloudProvider(SharedHttpClient http, ILogger<SoundCloudProvider>? logger = null)
     {
-        _http = http.Create("SoundCloud", proxied: !string.IsNullOrEmpty(proxyUrl));
+        _http = http.Create("SoundCloud", proxied: !string.IsNullOrEmpty(http.ProxyUrl));
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SoundCloudProvider>.Instance;
     }
 
@@ -202,6 +202,7 @@ public sealed class SoundCloudProvider : ISearchProvider, IDownloadProvider
                     return new DownloadResult(p, StreamQuality.Maximum256K, ProviderId.SoundCloud);
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogDebug("SoundCloud original download unavailable ({Msg}); using stream", ex.Message);

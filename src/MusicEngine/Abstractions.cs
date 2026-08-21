@@ -53,6 +53,42 @@ public interface IPreviewProvider : IMusicProvider
     Uri? GetPreviewStreamUri(SearchResult track);
 }
 
+/// <summary>One identified album — the expansion key for album search.</summary>
+public sealed record AlbumRef(
+    string Id,
+    string Name,
+    string Artist,
+    ProviderId Provider);
+
+/// <summary>
+/// A source that can expand an album into its full track list (album search).
+/// Implemented by iTunes/Deezer (lookup by album id) and Radio Javan (search-based,
+/// best effort). Results are ordinary downloadable SearchResults carrying the
+/// album's metadata and track numbers.
+/// </summary>
+public interface IAlbumProvider : IMusicProvider
+{
+    Task<IReadOnlyList<SearchResult>> GetAlbumTracksAsync(AlbumRef album, CancellationToken ct = default);
+}
+
+/// <summary>An album found by probing a query — the discovery trigger for album mode.</summary>
+public sealed record AlbumCandidate(
+    AlbumRef Album,
+    IReadOnlyList<SearchResult> Tracks);
+
+/// <summary>
+/// A source that can DISCOVER an album from a raw query (album search) — unlike
+/// <see cref="IAlbumProvider"/>, which expands an already-identified album. This
+/// is the path for Persian albums that live on YouTube playlists: the catalogs
+/// (iTunes/Deezer) index them as singles or not at all, and Radio Javan's search
+/// only surfaces one track per album. Implemented by the YouTube provider.
+/// </summary>
+public interface IAlbumDiscovery : IMusicProvider
+{
+    /// <summary>Probe the query for a matching album; null when none found.</summary>
+    Task<AlbumCandidate?> FindAlbumAsync(string query, CancellationToken ct = default);
+}
+
 public interface IDispatcher
 {
     void Run(Action action);

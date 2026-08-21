@@ -1,5 +1,6 @@
 namespace MusicEngine.Text;
 
+using System.Collections.Frozen;
 using System.Text.RegularExpressions;
 
 /// <summary>
@@ -13,7 +14,10 @@ public static class JunkFilter
         "contact us", "release music", "music library", "subscribe", "full album",
         "best of", "top hits", "mix 2025", "mix 2026", "1 hour", "hour mix",
     };
-    private static readonly string[] PersianJunkExact = { "دانلود آهنگ", "ویدیو", "کلیپ", "دانلود", "آلبوم" };
+    // MODERN-05: exact-membership set is frozen; substring scans stay arrays.
+    private static readonly FrozenSet<string> PersianJunkExact =
+        new[] { "دانلود آهنگ", "ویدیو", "کلیپ", "دانلود", "آلبوم" }
+            .ToFrozenSet(StringComparer.OrdinalIgnoreCase);
     private static readonly string[] VersionMarkers =
     {
         "music video", "official video", "موزیک ویدیو", "موزیک ویدئو", "اهنگ ویدیو",

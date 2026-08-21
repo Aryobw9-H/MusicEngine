@@ -21,6 +21,9 @@ public sealed class TrackItemViewModel : ViewModelBase
         OnPropertyChanged(nameof(Title));
         OnPropertyChanged(nameof(Artist));
         OnPropertyChanged(nameof(Album));
+        OnPropertyChanged(nameof(AlbumBadge));
+        OnPropertyChanged(nameof(IsAlbumRow));
+        OnPropertyChanged(nameof(TrackNumber));
         OnPropertyChanged(nameof(Duration));
         OnPropertyChanged(nameof(DurationSeconds));
         OnPropertyChanged(nameof(PreviewUrl));
@@ -29,8 +32,20 @@ public sealed class TrackItemViewModel : ViewModelBase
         OnPropertyChanged(nameof(HasPreview));
     }
 
-    public string Title => Work.Representative.Metadata.Title;
+    public string Title => IsAlbumRow && TrackNumber > 0
+        ? $"{TrackNumber:00}. {Work.Representative.Metadata.Title}"
+        : Work.Representative.Metadata.Title;
+
     public string Artist => Work.Representative.Metadata.Artist;
+
+    /// <summary>Album goal name — non-null only when the search was an album query.</summary>
+    public string AlbumBadge => Work.Goal.Album ?? "";
+
+    /// <summary>True only in album mode, so normal results don't grow album chips.</summary>
+    public bool IsAlbumRow => AlbumBadge.Length > 0;
+
+    /// <summary>Position within the album, when the source provides it.</summary>
+    public int TrackNumber => Work.Representative.Metadata.TrackNumber ?? 0;
     public string Album => Work.Representative.Metadata.Album ?? "";
     public double DurationSeconds => Work.Representative.Metadata.Duration?.TotalSeconds ?? 0;
 
@@ -59,7 +74,15 @@ public sealed class TrackItemViewModel : ViewModelBase
         }
     }
 
-    public bool IsInLibrary { get; set; }
+    private bool _isInLibrary;
+    public bool IsInLibrary
+    {
+        get => _isInLibrary;
+        set
+        {
+            if (Set(ref _isInLibrary, value)) OnPropertyChanged(nameof(LibraryBadge));
+        }
+    }
 
     public string LibraryBadge => IsInLibrary ? "✓ In library" : "";
 
@@ -102,7 +125,23 @@ public sealed class DownloadItemViewModel : ViewModelBase
 
     public string JobId { get; }
     public string Title { get; }
-    public string Provider { get; private set; } = "";
+
+    private string _provider = "";
+    public string Provider
+    {
+        get => _provider;
+        private set => Set(ref _provider, value);
+    }
+
+    private Models.TrackWork? _work;
+
+    /// <summary>The original work, kept so Restart can re-enqueue it directly
+    /// instead of reverse-engineering a lookup from the display title.</summary>
+    public Models.TrackWork? Work
+    {
+        get => _work;
+        set => Set(ref _work, value);
+    }
 
     public DownloadItemViewModel(string jobId, string title)
     {
@@ -113,7 +152,16 @@ public sealed class DownloadItemViewModel : ViewModelBase
     public DownloadPhase Phase
     {
         get => _phase;
-        private set => Set(ref _phase, value);
+        private set
+        {
+            if (Set(ref _phase, value))
+            {
+                OnPropertyChanged(nameof(IsActive));
+                OnPropertyChanged(nameof(IsFinished));
+                OnPropertyChanged(nameof(IsFailed));
+                OnPropertyChanged(nameof(IsPaused));
+            }
+        }
     }
 
     public int Percent
@@ -168,7 +216,6 @@ public sealed class DownloadItemViewModel : ViewModelBase
     public void Apply(DownloadProgress p, string provider)
     {
         Provider = provider;
-        OnPropertyChanged(nameof(Provider));
         Phase = p.Phase;
         Status = p.Message ?? p.Phase.ToString();
         if (p.FilePath is { Length: > 0 }) FilePath = p.FilePath;
@@ -212,12 +259,7 @@ public sealed class DownloadItemViewModel : ViewModelBase
         }
         _lastBytes = p.BytesDone;
         _lastAt = now;
-
-        OnPropertyChanged(nameof(IsActive));
-                OnPropertyChanged(nameof(IsFinished));
-                OnPropertyChanged(nameof(IsFailed));
-                OnPropertyChanged(nameof(IsPaused));
-            }
+    }
 
     private static string HumanSize(long bytes) => bytes switch
     {
@@ -238,6 +280,29 @@ public sealed class HistoryItemViewModel
 
     public string Display => string.IsNullOrWhiteSpace(Artist) ? Title : $"{Artist} — {Title}";
     public string When => At.ToString("yyyy-MM-dd HH:mm");
+}
+
+/// <summary>
+/// One provider chip in the search status strip (PERF-07): pending → responded
+/// → timed out/failed as the fan-out answers, or offline from the route probe.
+/// </summary>
+public sealed class ProviderStatusViewModel : ViewModelBase
+{
+    private Search.ProviderState _state;
+
+    public ProviderStatusViewModel(string name, Search.ProviderState state)
+    {
+        Name = name;
+        _state = state;
+    }
+
+    public string Name { get; }
+
+    public Search.ProviderState State
+    {
+        get => _state;
+        set => Set(ref _state, value);
+    }
 }
 
 /// <summary>One toast notification (auto-dismissed by the VM).</summary>

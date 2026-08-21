@@ -12,9 +12,13 @@ public sealed class PreviewPlayer : IDisposable
     private MediaPlayer? _player;
     private string? _currentUrl;
     private bool _suppressEnd; // stop() called explicitly — don't raise Ended
+    private int _generation;   // bumped on every Toggle; stale player callbacks bail out (BUG-07)
 
     /// <summary>Raised whenever playback state, position, or duration changes materially.</summary>
     public event Action? Changed;
+
+    /// <summary>Raised when the current stream fails to open, with the error message.</summary>
+    public event Action<string>? Failed;
 
     public bool IsPlaying => _player is not null;
     public string? CurrentUrl => _currentUrl;
@@ -41,6 +45,7 @@ public sealed class PreviewPlayer : IDisposable
         }
 
         StopInternal();
+        var gen = ++_generation;
 
         var player = new MediaPlayer { Volume = 0.8 };
         _player = player;
@@ -49,20 +54,24 @@ public sealed class PreviewPlayer : IDisposable
 
         player.MediaOpened += (_, _) =>
         {
+            if (gen != _generation) return; // a newer preview replaced this one
             player.Play();
             Changed?.Invoke();
         };
         player.MediaEnded += (_, _) =>
         {
+            if (gen != _generation) return;
             var suppressed = _suppressEnd;
-            StopInternal();
+            StopInternal(player);
             if (!suppressed) onStopped();
             Changed?.Invoke();
         };
-        player.MediaFailed += (_, _) =>
+        player.MediaFailed += (_, ex) =>
         {
-            StopInternal();
+            if (gen != _generation) return;
+            StopInternal(player);
             onStopped();
+            Failed?.Invoke(ex?.ErrorException?.Message ?? "Preview failed to load.");
             Changed?.Invoke();
         };
         player.Open(new Uri(url, UriKind.Absolute));
@@ -84,9 +93,15 @@ public sealed class PreviewPlayer : IDisposable
         Changed?.Invoke();
     }
 
-    private void StopInternal()
+    /// <summary>
+    /// Stops the current player. When <paramref name="expected"/> is supplied,
+    /// only stops if it is still the live player — a stale callback cannot kill
+    /// the newer preview (BUG-07).
+    /// </summary>
+    private void StopInternal(MediaPlayer? expected = null)
     {
         if (_player is null) return;
+        if (expected is not null && !ReferenceEquals(expected, _player)) return;
         try
         {
             _player.Stop();

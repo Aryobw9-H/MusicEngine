@@ -2,6 +2,8 @@ namespace MusicEngine.Http;
 
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
 using Network;
 
 /// <summary>
@@ -25,10 +27,67 @@ public sealed class SharedHttpClient : IDisposable
         _reach = reachability;
     }
 
+    /// <summary>The proxy URL this factory was built with (MODERN-07) — providers
+    /// that already hold a <see cref="SharedHttpClient"/> read it from here
+    /// instead of taking a duplicate constructor argument.</summary>
+    public string? ProxyUrl => _proxyUrl;
+
+    /// <summary>
+    /// Hosts allowed to present broken TLS certificate chains (self-signed /
+    /// expired CDN certs on scraping hosts). Only
+    /// <see cref="SslPolicyErrors.RemoteCertificateChainErrors"/> is tolerated —
+    /// a name mismatch is never forgiven — and only for these hosts; every other
+    /// host (iTunes, Deezer, SoundCloud, YouTube APIs) stays strictly validated.
+    /// Adding a host here disables chain validation for it; keep this list minimal
+    /// (BUG-13).
+    /// </summary>
+    private static readonly HashSet<string> RelaxedTlsHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Persian scraping/CDN hosts from ProviderHosts (API hosts excluded).
+        // dl.aimusicall.ir is currently dead server-side; kept so the provider
+        // re-works if/when the CDN returns.
+        "aimusicall.ir",
+        "dl.aimusicall.ir",
+        "music-fa.com",
+        "musics-fa.com",
+        "dls.musics-fa.com",
+        "upmusics.com",
+        "nex1music.com",
+        "rozmusic.com",
+        "dl.rozmusic.com",
+        "musicdel.ir",
+        "dl.musicdel.ir",
+        "behmelody.in",
+        "dl.behmelody.in",
+        "melody98.ir",
+        "dl.melody98.ir",
+        "biamusic.ir",
+        "dl.biamusic.ir",
+        "beatmastering.ir",
+        "dl.beatmastering.ir",
+        "aparat.com",
+        "cdn.asset.aparat.com",
+    };
+
     /// <summary>A real desktop-Chrome UA — several Iranian CDNs reject bare
     /// default-dotnet requests as obvious bots.</summary>
     public const string BrowserUa =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+    /// <summary>
+    /// Scoped TLS policy: valid chains pass; broken chains are tolerated only for
+    /// hosts on <see cref="RelaxedTlsHosts"/> and only when the sole error is a
+    /// chain error. Everything else fails validation (BUG-13).
+    /// </summary>
+    private static bool ValidateServerCertificate(object? sender, X509Certificate? _, X509Chain? __, SslPolicyErrors errors)
+    {
+        if (errors == SslPolicyErrors.None) return true;
+        if (errors == SslPolicyErrors.RemoteCertificateChainErrors
+            && sender is SslStream { TargetHostName: { } host }
+            && RelaxedTlsHosts.Contains(host))
+            return true;
+        return false;
+    }
 
     /// <summary>Shared client. <paramref name="proxied"/> picks the proxy-wired
     /// variant (for YouTube/Deezer/SoundCloud on filtered networks); Iranian
@@ -61,8 +120,8 @@ public sealed class SharedHttpClient : IDisposable
                 }
                 if (insecureTls)
                 {
-                    direct.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-                    viaProxy.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+                    direct.SslOptions.RemoteCertificateValidationCallback = ValidateServerCertificate;
+                    viaProxy.SslOptions.RemoteCertificateValidationCallback = ValidateServerCertificate;
                 }
                 return new HttpClient(new RoutingHandler(_reach, direct, viaProxy), disposeHandler: true)
                 {
@@ -85,7 +144,7 @@ public sealed class SharedHttpClient : IDisposable
                 }
             }
             if (insecureTls)
-                handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+                handler.SslOptions.RemoteCertificateValidationCallback = ValidateServerCertificate;
             return new HttpClient(handler, disposeHandler: true)
             {
                 Timeout = TimeSpan.FromSeconds(30),

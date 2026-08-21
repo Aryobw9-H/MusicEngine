@@ -22,28 +22,35 @@ public sealed class PersianIndexProvider : ISearchProvider, IDownloadProvider
     private readonly string _pythonPath;
     private readonly string _scriptPath;
     private readonly string? _proxyUrl;
-    private readonly bool _available;
+    private readonly Lazy<Task<bool>> _availability;
 
     public ProviderId Id => ProviderId.PersianIndex;
     public string DisplayName => "Persian Index";
     public SearchTier Tier => SearchTier.DownloadOnly;
-    public bool IsAvailable => _available;
 
-    public PersianIndexProvider(AppConfig config, ILogger<PersianIndexProvider>? logger = null)
+    /// <summary>
+    /// Non-blocking: false until the lazy python probe has actually completed
+    /// (BUG-05). Callers that need the verdict may await <see cref="EnsureAvailableAsync"/>.
+    /// </summary>
+    public bool IsAvailable => _availability.Value is { IsCompletedSuccessfully: true, Result: true };
+
+    public PersianIndexProvider(Configuration.ISettings config, ILogger<PersianIndexProvider>? logger = null)
     {
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<PersianIndexProvider>.Instance;
         _pythonPath = config.PythonPath ?? "python";
         _proxyUrl = config.ProxyUrl;
         _scriptPath = Path.Combine(AppContext.BaseDirectory, "Tools", "persian_fetch.py");
-        _available = config.EnablePersianIndex
-                     && File.Exists(_scriptPath)
-                     && ProbePython();
-        if (!_available && config.EnablePersianIndex)
+        var enabled = config.EnablePersianIndex && File.Exists(_scriptPath);
+        if (!enabled && config.EnablePersianIndex)
             _logger.LogInformation("Persian Index disabled (script={Script} python={Python} available=false)",
                 _scriptPath, _pythonPath);
+        _availability = new Lazy<Task<bool>>(() => enabled ? Task.Run(ProbePythonAsync) : Task.FromResult(false));
     }
 
-    private bool ProbePython()
+    /// <summary>Await the lazily-evaluated python/curl_cffi probe.</summary>
+    public Task<bool> EnsureAvailableAsync() => _availability.Value;
+
+    private async Task<bool> ProbePythonAsync()
     {
         try
         {
@@ -57,8 +64,18 @@ public sealed class PersianIndexProvider : ISearchProvider, IDownloadProvider
                 UseShellExecute = false,
             };
             using var p = Process.Start(psi);
-            p?.WaitForExit(15000);
-            return p is { HasExited: true, ExitCode: 0 };
+            if (p is null) return false;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            try
+            {
+                await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { p.Kill(entireProcessTree: true); } catch { /* already exited */ }
+                return false;
+            }
+            return p.ExitCode == 0;
         }
         catch
         {
@@ -192,7 +209,10 @@ public sealed class PersianIndexProvider : ISearchProvider, IDownloadProvider
         }
         await proc.WaitForExitAsync(ct).ConfigureAwait(false);
 
-        var stderr = stderrTask.Result;
+        // Await, never .Result — a redirected pipe can still hold buffered data
+        // after WaitForExit, and .Result blocks a pool thread and wraps failures
+        // in AggregateException (BUG-11).
+        var stderr = await stderrTask.ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(stderr))
             _logger.LogDebug("persian_fetch stderr: {Err}", stderr[..Math.Min(stderr.Length, 300)]);
         return string.Join('\n', lines);

@@ -1,5 +1,6 @@
 namespace MusicEngine.Search;
 
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Models;
 
@@ -65,47 +66,37 @@ public sealed class ProviderHealthMonitor
     }
 }
 
+
 /// <summary>
-/// Cache-aside result cache keyed by the normalized query; saves repeat searches
-/// (very common) and makes the second search instant.
+/// Short-TTL per-provider response cache (PERF-03): keyed by
+/// (ProviderId, query), so rescue rounds that re-ask the same provider with a
+/// slightly different variant, and repeated searches within a session, skip the
+/// HTTP round-trip. 45-second TTL; bounded at 256 entries.
 /// </summary>
-public sealed class SearchResultCache
+public sealed class ProviderResponseCache
 {
-    private sealed record Entry(IReadOnlyList<TrackWork> Works, DateTimeOffset StoredAt);
+    private sealed record Entry(DateTimeOffset At, IReadOnlyList<SearchResult> Rows);
 
-    private readonly Dictionary<string, Entry> _cache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly object _lock = new();
-    private readonly TimeSpan _ttl;
+    private readonly ConcurrentDictionary<(ProviderId Id, string Query), Entry> _store = new();
+    private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(45);
+    private const int Cap = 256;
 
-    public SearchResultCache(TimeSpan? ttl = null) => _ttl = ttl ?? TimeSpan.FromHours(6);
-
-    public IReadOnlyList<TrackWork>? TryGet(string rawQuery)
+    public bool TryGet(ProviderId id, string query, out IReadOnlyList<SearchResult> rows)
     {
-        var key = Text.TrackTextNormalizer.Normalize(rawQuery);
-        if (key.Length == 0) return null;
-        lock (_lock)
+        if (_store.TryGetValue((id, query), out var e) && DateTimeOffset.UtcNow - e.At < Ttl)
         {
-            if (_cache.TryGetValue(key, out var e) && DateTimeOffset.UtcNow - e.StoredAt < _ttl)
-                return e.Works;
-            _cache.Remove(key);
-            return null;
+            rows = e.Rows;
+            return true;
         }
+        rows = Array.Empty<SearchResult>();
+        return false;
     }
 
-    public void Store(string rawQuery, IReadOnlyList<TrackWork> works)
+    public void Store(ProviderId id, string query, IReadOnlyList<SearchResult> rows)
     {
-        var key = Text.TrackTextNormalizer.Normalize(rawQuery);
-        if (key.Length == 0) return;
-        lock (_lock)
-        {
-            if (_cache.Count >= 512)
-            {
-                var oldest = _cache.OrderBy(kv => kv.Value.StoredAt).First();
-                _cache.Remove(oldest.Key);
-            }
-            _cache[key] = new Entry(works, DateTimeOffset.UtcNow);
-        }
+        if (_store.Count >= Cap) _store.Clear(); // documented simple strategy
+        _store[(id, query)] = new Entry(DateTimeOffset.UtcNow, rows);
     }
 
-    public void Clear() { lock (_lock) _cache.Clear(); }
+    public void Clear() => _store.Clear();
 }

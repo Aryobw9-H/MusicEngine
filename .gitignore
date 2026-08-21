@@ -32,8 +32,7 @@ Thumbs.db
 *.cache
 
 # Test/debug scratch files (kept out of repo — re-runnable from HANDOFF)
-fifty-results.txt
-fifty-results-v2.txt
+fifty-results*.txt
 final-test.txt
 fresh-queries.txt
 recheck-queries.txt

@@ -11,16 +11,16 @@ using Text;
 
 /// <summary>
 /// Direct-MP3 finder across Iranian music indexes — download tier, resolved only
-/// after the user clicks Download. Two strategies, one provider:
+/// after the user clicks Download.
 ///
-///  1. aimusicall.ir — WordPress search whose SERP embeds direct
-///     dl.aimusicall.ir/…/[320].mp3 links (Persian queries only, so the query is
-///     Finglish-expanded first).
-///  2. music-fa.com / upmusics.com — artist/tag pages embedding &lt;audio src&gt;
-///     players.
-///
-/// These hosts intermittently sit behind Cloudflare; when they yield nothing the
-/// resolver falls through to YouTube/yt-dlp.
+/// aimusicall.ir — WordPress search (Persian queries only, so the query is
+/// Finglish-expanded first). The site moved its SERP from <c>?s=&lt;q&gt;</c> to
+/// <c>/search/&lt;q&gt;</c> (the old URL 302s), so we hit the canonical path
+/// directly. The SERP and post pages embed dl.aimusicall.ir/…/&lt;artist&gt; -
+/// &lt;title&gt;.mp3 links; the CDN has been serving 404 for all of them, so each
+/// candidate is liveness-probed (ranged GET) before it is surfaced — a dead
+/// link must never reach the queue. When nothing is alive the resolver falls
+/// through to the other sources (nex1music, Radio Javan, yt-dlp).
 /// </summary>
 public sealed class PersianSitesProvider : ISearchProvider, IDownloadProvider
 {
@@ -67,7 +67,7 @@ public sealed class PersianSitesProvider : ISearchProvider, IDownloadProvider
             string html;
             try
             {
-                using var resp = await _http.GetAsync("https://aimusicall.ir/?s=" + Uri.EscapeDataString(q), ct)
+                using var resp = await _http.GetAsync("https://aimusicall.ir/search/" + Uri.EscapeDataString(q), ct)
                     .ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode) continue;
                 html = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -80,8 +80,17 @@ public sealed class PersianSitesProvider : ISearchProvider, IDownloadProvider
             mp3s.AddRange(Mp3Regex.Matches(html).Select(m => m.Value));
         }
 
-        var emitted = 0;
+        // The CDN has 404'd every file we've seen (stale posts keep their dead
+        // links). Probe each candidate before surfacing it — a ranged GET that
+        // returns anything but 200/206 means the file is gone.
+        var alive = new List<string>();
         foreach (var mp3Url in mp3s.Distinct().Take(maxResults))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (await IsAliveAsync(mp3Url, ct).ConfigureAwait(false)) alive.Add(mp3Url);
+        }
+
+        foreach (var mp3Url in alive)
         {
             ct.ThrowIfCancellationRequested();
             var (fileArtist, fileTitle) = ParseFileName(mp3Url);
@@ -99,7 +108,25 @@ public sealed class PersianSitesProvider : ISearchProvider, IDownloadProvider
                 SourceUrl = mp3Url,
                 Downloadable = true,
             };
-            emitted++;
+        }
+    }
+
+    /// <summary>Range-probe the CDN file. dl.aimusicall.ir serves a self-signed
+    /// cert and 404s files the site still links — only real files should surface.</summary>
+    private async Task<bool> IsAliveAsync(string mp3Url, CancellationToken ct)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, mp3Url);
+            req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 1023);
+            using var resp = await _dlHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
+                .ConfigureAwait(false);
+            return resp.StatusCode is System.Net.HttpStatusCode.OK or System.Net.HttpStatusCode.PartialContent;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("aimusicall probe failed for {Url}: {Msg}", mp3Url, ex.Message);
+            return false;
         }
     }
 

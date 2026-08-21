@@ -59,6 +59,7 @@ D:\dotnet-sdk\dotnet.exe run -- fifty
 - **Goal-based identity**: iTunes/Deezer catalogs identify the real song; all other sources must match that identity
 - **Streaming results**: providers answer at different speeds; rows appear incrementally
 - **Download fallback chain**: native providers → yt-dlp universal downloader
+- **Persian MP3s preferred**: every download also searches upmusics/musics-fa/nex1music for a direct 320k file, which outranks SoundCloud/Radio Javan/YouTube
 - **Tagged MP3 output**: ID3v2 tags + embedded artwork via TagLib#
 - **Smart network routing**: per-host direct/proxy/dead detection, auto-recovery when network changes
 - **WPF dark theme UI**: 5 accent colors, preview playback, download queue/history, system tray, clipboard watcher, toast notifications
@@ -81,6 +82,7 @@ D:\dotnet-sdk\dotnet.exe run -- fifty
 
 - `appsettings.json` next to the exe (copied from `src/MusicEngine.App/appsettings.json`)
 - Proxy: `socks5://127.0.0.1:10808` (v2ray SOCKS5) — required for YouTube/SoundCloud/Deezer
+- **YouTube bot checks**: if yt-dlp downloads fail with "Sign in to confirm you're not a bot", the proxy exit IP is flagged. Set **Browser for YouTube cookies** in Settings (e.g. `chrome` — close the browser first so its cookie DB is not locked), or export a `cookies.txt` with a browser extension and set the **cookies.txt file** field (works while the browser is open).
 - Crash log: `%APPDATA%\MusicEngine\crash.log`
 - Persistent state: `%APPDATA%\MusicEngine\state.json`
 

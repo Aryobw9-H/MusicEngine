@@ -21,4 +21,8 @@
     <None Include="Tools\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="MusicEngine.Tests" />
+  </ItemGroup>
+
 </Project>

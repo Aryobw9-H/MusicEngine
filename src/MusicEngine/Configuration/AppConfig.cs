@@ -15,7 +15,7 @@ public enum FilenameTemplate
 /// App configuration, persisted as appsettings.json next to the executable.
 /// No hard-coded paths anywhere else — everything tunable lives here.
 /// </summary>
-public sealed class AppConfig
+public sealed class AppConfig : ISettings
 {
     public string OutputDirectory { get; set; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), "MusicEngine");
@@ -31,6 +31,11 @@ public sealed class AppConfig
 
     /// <summary>Browser whose cookies yt-dlp may use for YouTube bot checks ("chrome", "firefox"…). Null = none.</summary>
     public string? CookiesBrowser { get; set; }
+
+    /// <summary>Path to a cookies.txt export yt-dlp should use for YouTube bot
+    /// checks. Preferred over <see cref="CookiesBrowser"/> when both are set
+    /// (a file works even while the browser is running). Null = none.</summary>
+    public string? CookiesFile { get; set; }
 
     /// <summary>Enable the Python curl_cffi sidecar for music-fa/upmusics/taksong. Auto-disabled when python/curl_cffi is missing.</summary>
     public bool EnablePersianIndex { get; set; } = true;
@@ -99,9 +104,26 @@ public sealed class AppConfig
 
     public void Save()
     {
-        try { File.WriteAllText(ConfigPath, JsonSerializer.Serialize(this, JsonOpts)); }
+        try { WriteAtomic(ConfigPath, JsonSerializer.Serialize(this, JsonOpts)); }
         catch { /* best effort */ }
     }
 
+    /// <summary>
+    /// Write via a temp file + atomic rename so a crash or power loss mid-write
+    /// cannot leave a truncated appsettings.json (BUG-09).
+    /// </summary>
+    private static void WriteAtomic(string path, string json)
+    {
+        var tmp = path + ".tmp";
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(tmp, json);
+        File.Move(tmp, path, overwrite: true);
+    }
+
     public bool IsSourceEnabled(ProviderId id) => !DisabledSources.Contains(id.ToString());
+
+    // Explicit implementation: the mutable HashSet stays the public surface (the
+    // WPF layer mutates it); the engine sees a read-only view (MODERN-01).
+    IReadOnlyCollection<string> ISettings.DisabledSources => DisabledSources;
 }
+

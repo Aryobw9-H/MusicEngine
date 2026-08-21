@@ -141,6 +141,27 @@ Remaining three (all return 0, deep path exhausted):
   PowerShell scripts were used for this; SearchBox automation id, "Search"
   button name).
 
+## Streaming Service Integration (2026-08-18)
+
+Comprehensive research completed on integrating Deezer, Qobuz, Tidal, Spotify,
+and Soulseek. Full report: `STREAMING_SERVICE_DOWNLOAD_RESEARCH.md`.
+
+**Key findings:**
+- **Deezer** (easiest): Free accounts work for 128kbps MP3 via ARL cookie auth.
+  Multiple Python libraries: `deezspot`, `deezer-downloader`, `streamrip`.
+- **Soulseek** (free FLAC): P2P network, massive catalog, FLAC quality.
+  `py-soulseek-lib` and `nicotine-plus-plus` for programmatic access.
+- **Qobuz** (best quality): FLAC 24/192, but requires paid subscription.
+  `qobuz-dl2` modernized fork with token-based auth.
+- **Spotify** (free 160kbps): `Zotify` downloads directly from source.
+- **Tidal** (free 128kbps): Tools unstable, API changes frequently.
+
+**Recommended integration order:**
+1. Deezer via deezspot (Python sidecar, free → 128kbps)
+2. Soulseek via py-soulseek-lib (free → FLAC)
+3. Qobuz via qobuz-dl2 (subscription → FLAC 24/192)
+4. Spotify via Zotify (free → 160kbps)
+
 ## Immediate task list (in order)
 
 1. Fix OPEN PROBLEM 1 (loose-gate over-merging). Re-run batch until top hits
@@ -150,3 +171,5 @@ Remaining three (all return 0, deep path exhausted):
 3. Re-run `-- live` suite + offline suite; all green.
 4. Update `v2/README.md` §1/§2 if gate semantics changed, and this file's
    open-problems section if new ones appear.
+5. Implement Deezer sidecar integration (highest priority streaming service).
+6. Implement Soulseek integration (free FLAC, P2P).

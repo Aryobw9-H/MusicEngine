@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Text;
 
 namespace MusicEngine.Text;
@@ -19,21 +20,44 @@ namespace MusicEngine.Text;
 /// </summary>
 public static class FinglishConverter
 {
+    // MODERN-05: build-once/read-many tables are frozen (cache-friendly, faster
+    // lookups than Dictionary on the conversion hot path). Same comparers as before.
     private static readonly Lazy<IReadOnlyDictionary<string, string[]>> Beginning =
-        new(() => ParseTable(Embedded.Load("f2p-beginning.txt")));
+        new(() => ParseTable(Embedded.Load("f2p-beginning.txt")).ToFrozenDictionary(StringComparer.Ordinal));
     private static readonly Lazy<IReadOnlyDictionary<string, string[]>> Middle =
-        new(() => ParseTable(Embedded.Load("f2p-middle.txt")));
+        new(() => ParseTable(Embedded.Load("f2p-middle.txt")).ToFrozenDictionary(StringComparer.Ordinal));
     private static readonly Lazy<IReadOnlyDictionary<string, string[]>> Ending =
-        new(() => ParseTable(Embedded.Load("f2p-ending.txt")));
+        new(() => ParseTable(Embedded.Load("f2p-ending.txt")).ToFrozenDictionary(StringComparer.Ordinal));
     private static readonly Lazy<IReadOnlyDictionary<string, string>> Dict =
-        new(() => ParseDict(Embedded.Load("f2p-dict.txt")));
+        new(() => ParseDict(Embedded.Load("f2p-dict.txt")).ToFrozenDictionary(StringComparer.Ordinal));
     private static readonly Lazy<IReadOnlyDictionary<string, string>> MusicDict =
-        new(() => ParseDict(Embedded.Load("f2p-music.txt")));
+        new(() => ParseDict(Embedded.Load("f2p-music.txt")).ToFrozenDictionary(StringComparer.Ordinal));
     private static readonly Lazy<IReadOnlyDictionary<string, string>> TrickyDict =
-        new(() => ParseDict(Embedded.Load("f2p-tricky.txt")));
+        new(() => ParseDict(Embedded.Load("f2p-tricky.txt")).ToFrozenDictionary(StringComparer.Ordinal));
 
-    /// <summary>Memoized phrase conversions — the gate converts many strings repeatedly.</summary>
+    /// <summary>
+    /// Reverse index (PERF-02): Persian → first Latin spelling, plus the set of
+    /// known Persian values. Turns the O(|dictionary|) scans in
+    /// <see cref="FindLatinForPersian"/> and <see cref="ScoreAlternatives"/>
+    /// into O(1) lookups. Built once, lazily, from the already-loaded base dict.
+    /// </summary>
+    private static readonly Lazy<HashSet<string>> KnownPersian =
+        new(() => new HashSet<string>(Dict.Value.Values, StringComparer.Ordinal));
+    private static readonly Lazy<Dictionary<string, string>> ReverseDict =
+        new(() =>
+        {
+            var d = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (latin, persian) in Dict.Value) d.TryAdd(persian, latin);
+            return d;
+        });
+
+    /// <summary>
+    /// Memoized phrase conversions — the gate converts many strings repeatedly.
+    /// Bounded (BUG-08): cleared wholesale past 4096 entries so a long session of
+    /// scraped title normalisation cannot leak memory for the process lifetime.
+    /// </summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> PhraseCache = new();
+    private const int PhraseCacheLimit = 4096;
 
     /// <summary>
     /// Curated dictionaries merged in priority order (highest first):
@@ -92,6 +116,7 @@ public static class FinglishConverter
     public static string Convert(string phrase)
     {
         if (phrase.Length > 120) return phrase; // absurd input — don't cache or convert
+        if (PhraseCache.Count > PhraseCacheLimit) PhraseCache.Clear();
         return PhraseCache.GetOrAdd(phrase, ConvertUncached);
     }
 
@@ -114,12 +139,8 @@ public static class FinglishConverter
     {
         var norm = persianWord.Trim();
         if (norm.Length == 0) return null;
-        // exact whole-word reversal first
-        foreach (var (latin, p) in Dict.Value)
-        {
-            if (string.Equals(p, norm, StringComparison.Ordinal)) return latin;
-        }
-        return null;
+        // exact whole-word reversal via the reverse index (PERF-02)
+        return ReverseDict.Value.TryGetValue(norm, out var latin) ? latin : null;
     }
 
     /// <summary>
@@ -284,7 +305,7 @@ public static class FinglishConverter
     /// </summary>
     private static double ScoreAlternatives(string persian)
     {
-        if (Dict.Value.Values.Contains(persian, StringComparer.Ordinal)) return 1.0;
+        if (KnownPersian.Value.Contains(persian)) return 1.0;
         return 0.5;
     }
 
